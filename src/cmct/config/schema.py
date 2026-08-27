@@ -6,6 +6,28 @@ from typing import Any, Literal
 
 
 @dataclass
+class CropSpec:
+    """One stage of resize-then-crop. Applied in a fixed order:
+    Resize(resize) -> crop -> hflip -> ToTensor -> Normalize."""
+
+    resize: tuple[int, int]
+    crop: Literal["random", "center", "none"] = "none"
+    crop_size: int = 224
+    hflip: bool = False
+
+
+@dataclass
+class TransformSpec:
+    """Transform pipelines for one dataset. Shape is a dataset property, not an
+    experiment knob: VisDA resizes straight to 224 and center-crops where the
+    others resize to 256 and random-crop."""
+
+    train: CropSpec
+    test: CropSpec
+    interpolation: Literal["bilinear", "bicubic"] = "bilinear"
+
+
+@dataclass
 class DatasetSpec:
     """Properties of a dataset, identical across experiments.
 
@@ -17,7 +39,7 @@ class DatasetSpec:
     domains: list[str]
     num_classes: int
     layout: Literal["class_folder", "image_list"]
-    image_size: int = 224
+    transform: TransformSpec
     pixel_mean: tuple[float, float, float] = (0.48145466, 0.4578275, 0.40821073)
     pixel_std: tuple[float, float, float] = (0.26862954, 0.26130258, 0.27577711)
     classname_overrides: dict[str, str] = field(default_factory=dict)
@@ -31,7 +53,7 @@ class DataConfig:
     root: str
     source_domains: list[str]
     target_domains: list[str]
-    batch_size_test: int = 100
+    batch_size_test: int = 128
     num_workers_test: int = 8
     clarify_classnames: bool = False
     """Apply DatasetSpec.classname_overrides. Shared by every branch: giving two
@@ -55,7 +77,8 @@ class StreamConfig:
     num_workers: int = 8
     strong_aug: bool = False
     """Produce an extra, harder-augmented target view for this branch. Its cost
-    differs by branch type, so it is a per-branch choice."""
+    differs by branch type, so it is a per-branch choice. NOT IMPLEMENTED yet:
+    setting it raises rather than silently doing nothing."""
 
 
 @dataclass

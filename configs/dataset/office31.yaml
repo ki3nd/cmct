@@ -3,3 +3,9 @@ dir: office31
 domains: [amazon, dslr, webcam]
 num_classes: 31
 layout: class_folder
+
+# Applied in a fixed order: Resize -> crop -> hflip -> ToTensor -> Normalize.
+transform:
+  interpolation: bilinear
+  train: {resize: [256, 256], crop: random, crop_size: 224, hflip: true}
+  test: {resize: [224, 224], crop: none, crop_size: 224, hflip: false}

@@ -70,22 +70,22 @@ def test_extra_carries_branch_private_knobs():
 
 
 def test_unknown_top_level_key(tmp_path):
-    with pytest.raises(ConfigError, match="key lạ ở mức trên cùng"):
+    with pytest.raises(ConfigError, match="unknown top-level key"):
         load_tmp(tmp_path, lambda r: r.update(trainer="PHPL"))
 
 
 def test_unknown_nested_key(tmp_path):
-    with pytest.raises(ConfigError, match=r"data: key lạ \['num_classes'\]"):
+    with pytest.raises(ConfigError, match=r"data: unknown key\(s\) \['num_classes'\]"):
         load_tmp(tmp_path, lambda r: r["data"].update(num_classes=65))
 
 
 def test_unknown_branch_key(tmp_path):
-    with pytest.raises(ConfigError, match=r"branches\[0\]: key lạ"):
+    with pytest.raises(ConfigError, match=r"branches\[0\]: unknown key"):
         load_tmp(tmp_path, lambda r: r["branches"][0].update(arch="RN101"))
 
 
 def test_missing_required_field(tmp_path):
-    with pytest.raises(ConfigError, match=r"data: thiếu field bắt buộc \['root'\]"):
+    with pytest.raises(ConfigError, match=r"data: missing required field\(s\) \['root'\]"):
         load_tmp(tmp_path, lambda r: r["data"].pop("root"))
 
 
@@ -100,39 +100,39 @@ def test_missing_branch_dtype(tmp_path):
 
 
 def test_bad_dtype(tmp_path):
-    with pytest.raises(ConfigError, match=r"'fp8' không hợp lệ"):
+    with pytest.raises(ConfigError, match=r"'fp8' is not a valid value"):
         load_tmp(tmp_path, lambda r: r["branches"][0]["backbone"].update(dtype="fp8"))
 
 
 def test_bad_cross_ref_refresh(tmp_path):
-    with pytest.raises(ConfigError, match="không hợp lệ"):
+    with pytest.raises(ConfigError, match="is not a valid value"):
         load_tmp(tmp_path, lambda r: r["cotrain"].update(cross_ref_refresh="epoch"))
 
 
 def test_domain_not_in_dataset(tmp_path):
-    with pytest.raises(ConfigError, match="không thuộc dataset 'officehome'"):
+    with pytest.raises(ConfigError, match="not in dataset 'officehome'"):
         load_tmp(tmp_path, lambda r: r["data"].update(source_domains=["sketch"]))
 
 
 def test_source_target_overlap(tmp_path):
-    with pytest.raises(ConfigError, match="trùng nhau"):
+    with pytest.raises(ConfigError, match="overlap"):
         load_tmp(tmp_path, lambda r: r["data"].update(target_domains=["art"]))
 
 
 def test_empty_domain_list(tmp_path):
-    with pytest.raises(ConfigError, match="không được rỗng"):
+    with pytest.raises(ConfigError, match="must not be empty"):
         load_tmp(tmp_path, lambda r: r["data"].update(source_domains=[]))
 
 
 def test_duplicate_branch_names(tmp_path):
     def mutate(r):
         r["branches"][1]["name"] = r["branches"][0]["name"]
-    with pytest.raises(ConfigError, match="tên trùng nhau"):
+    with pytest.raises(ConfigError, match="duplicate names"):
         load_tmp(tmp_path, mutate)
 
 
 def test_no_branches(tmp_path):
-    with pytest.raises(ConfigError, match="cần ít nhất một nhánh"):
+    with pytest.raises(ConfigError, match="at least one branch is required"):
         load_tmp(tmp_path, lambda r: r.update(branches=[]))
 
 
@@ -147,13 +147,13 @@ def test_threshold_out_of_range(tmp_path):
 
 
 def test_unknown_dataset_name(tmp_path):
-    with pytest.raises(ConfigError, match="không tìm thấy file config"):
+    with pytest.raises(ConfigError, match="config file not found"):
         load_tmp(tmp_path, dataset_name="cifar10")
 
 
 def test_wrong_type_raises(tmp_path):
-    with pytest.raises(ConfigError, match="cần int"):
-        load_tmp(tmp_path, lambda r: r["run"].update(seed="bốn hai"))
+    with pytest.raises(ConfigError, match="expected int"):
+        load_tmp(tmp_path, lambda r: r["run"].update(seed="forty two"))
 
 
 def test_int_accepted_where_float_expected(tmp_path):
@@ -170,7 +170,7 @@ def test_dump_then_load_resolved_round_trips(tmp_path):
 
 
 def test_load_resolved_rejects_experiment_form():
-    with pytest.raises(ConfigError, match="không phải config đã resolve"):
+    with pytest.raises(ConfigError, match="not a resolved config"):
         load_resolved(EXPERIMENT)
 
 

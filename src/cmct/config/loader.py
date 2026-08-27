@@ -34,33 +34,35 @@ def _coerce(tp: Any, value: Any, where: str) -> Any:
 
     if origin is Literal:
         if value not in args:
-            raise ConfigError(f"{where}: {value!r} không hợp lệ; chọn: {list(args)}")
+            raise ConfigError(
+                f"{where}: {value!r} is not a valid value; choose one of {list(args)}"
+            )
         return value
 
     if origin in (Union, UnionType):
         non_none = [a for a in args if a is not type(None)]
         if value is None:
             if len(non_none) == len(args):
-                raise ConfigError(f"{where}: không được để trống")
+                raise ConfigError(f"{where}: must not be null")
             return None
         return _coerce(non_none[0], value, where)
 
     if origin is list:
         if not isinstance(value, list):
-            raise ConfigError(f"{where}: cần list, nhận {type(value).__name__}")
+            raise ConfigError(f"{where}: expected a list, got {type(value).__name__}")
         return [_coerce(args[0], v, f"{where}[{i}]") for i, v in enumerate(value)]
 
     if origin is tuple:
         if not isinstance(value, (list, tuple)):
-            raise ConfigError(f"{where}: cần list, nhận {type(value).__name__}")
+            raise ConfigError(f"{where}: expected a list, got {type(value).__name__}")
         if len(args) != len(value):
-            raise ConfigError(f"{where}: cần đúng {len(args)} phần tử, nhận {len(value)}")
+            raise ConfigError(f"{where}: expected exactly {len(args)} items, got {len(value)}")
         pairs = enumerate(zip(args, value, strict=True))
         return tuple(_coerce(a, v, f"{where}[{i}]") for i, (a, v) in pairs)
 
     if origin is dict:
         if not isinstance(value, dict):
-            raise ConfigError(f"{where}: cần dict, nhận {type(value).__name__}")
+            raise ConfigError(f"{where}: expected a mapping, got {type(value).__name__}")
         if args and args[1] is not Any:
             return {k: _coerce(args[1], v, f"{where}.{k}") for k, v in value.items()}
         return dict(value)
@@ -70,21 +72,21 @@ def _coerce(tp: Any, value: Any, where: str) -> Any:
     if tp is float and isinstance(value, int) and not isinstance(value, bool):
         return float(value)
     if tp is bool and not isinstance(value, bool):
-        raise ConfigError(f"{where}: cần true/false, nhận {value!r}")
+        raise ConfigError(f"{where}: expected true or false, got {value!r}")
     if isinstance(tp, type) and not isinstance(value, tp):
-        raise ConfigError(f"{where}: cần {tp.__name__}, nhận {type(value).__name__}")
+        raise ConfigError(f"{where}: expected {tp.__name__}, got {type(value).__name__}")
     return value
 
 
 def _build(cls: Any, raw: Any, where: str) -> Any:
     if not isinstance(raw, dict):
-        raise ConfigError(f"{where}: cần dict, nhận {type(raw).__name__}")
+        raise ConfigError(f"{where}: expected a mapping, got {type(raw).__name__}")
 
     hints = get_type_hints(cls)
     names = {f.name for f in fields(cls)}
     unknown = sorted(set(raw) - names)
     if unknown:
-        raise ConfigError(f"{where}: key lạ {unknown}; hợp lệ: {sorted(names)}")
+        raise ConfigError(f"{where}: unknown key(s) {unknown}; valid keys: {sorted(names)}")
 
     kwargs = {k: _coerce(hints[k], v, f"{where}.{k}") for k, v in raw.items()}
     missing = sorted(
@@ -94,23 +96,23 @@ def _build(cls: Any, raw: Any, where: str) -> Any:
         and f.default_factory is dataclasses.MISSING
     )
     if missing:
-        raise ConfigError(f"{where}: thiếu field bắt buộc {missing}")
+        raise ConfigError(f"{where}: missing required field(s) {missing}")
     return cls(**kwargs)
 
 
 def _read_yaml(path: Path) -> dict:
     if not path.is_file():
-        raise ConfigError(f"không tìm thấy file config: {path}")
+        raise ConfigError(f"config file not found: {path}")
     raw = yaml.safe_load(path.read_text()) or {}
     if not isinstance(raw, dict):
-        raise ConfigError(f"{path}: nội dung phải là mapping")
+        raise ConfigError(f"{path}: top-level content must be a mapping")
     return raw
 
 
 def _assemble(dataset: DatasetSpec, raw: dict) -> Config:
     unknown = sorted(set(raw) - _TOP_LEVEL)
     if unknown:
-        raise ConfigError(f"key lạ ở mức trên cùng {unknown}; hợp lệ: {sorted(_TOP_LEVEL)}")
+        raise ConfigError(f"unknown top-level key(s) {unknown}; valid keys: {sorted(_TOP_LEVEL)}")
     cfg = Config(
         dataset=dataset,
         data=_build(DataConfig, raw.get("data", {}), "data"),
@@ -135,18 +137,18 @@ def load_experiment(path: str | Path, config_root: str | Path | None = None) -> 
     path = Path(path)
     raw = _read_yaml(path)
     if "dataset" not in raw:
-        raise ConfigError(f"{path}: thiếu key 'dataset' (tên bộ dữ liệu)")
+        raise ConfigError(f"{path}: missing key 'dataset' (the dataset name)")
     name = raw.pop("dataset")
     if not isinstance(name, str):
         raise ConfigError(
-            f"{path}: 'dataset' phải là tên bộ dữ liệu, không phải {type(name).__name__}"
+            f"{path}: 'dataset' must be a dataset name, not {type(name).__name__}"
         )
 
     root = Path(config_root) if config_root is not None else path.parent.parent
     ds_path = root / "dataset" / f"{name}.yaml"
     dataset = _build(DatasetSpec, _read_yaml(ds_path), str(ds_path))
     if dataset.name != name:
-        raise ConfigError(f"{ds_path}: name '{dataset.name}' không khớp tên file '{name}'")
+        raise ConfigError(f"{ds_path}: name '{dataset.name}' does not match the file name '{name}'")
     return _assemble(dataset, raw)
 
 
@@ -155,7 +157,7 @@ def load_resolved(path: str | Path) -> Config:
     rather than a name."""
     raw = _read_yaml(Path(path))
     if not isinstance(raw.get("dataset"), dict):
-        raise ConfigError(f"{path}: đây không phải config đã resolve; dùng load_experiment")
+        raise ConfigError(f"{path}: not a resolved config; use load_experiment instead")
     dataset = _build(DatasetSpec, raw.pop("dataset"), "dataset")
     return _assemble(dataset, raw)
 
@@ -176,33 +178,33 @@ def validate(cfg: Config) -> None:
         bad = [d for d in getattr(cfg.data, role) if d not in known]
         if bad:
             raise ConfigError(
-                f"data.{role}: {bad} không thuộc dataset '{cfg.dataset.name}'; "
-                f"có: {cfg.dataset.domains}"
+                f"data.{role}: {bad} not in dataset '{cfg.dataset.name}'; "
+                f"available: {cfg.dataset.domains}"
             )
         if not getattr(cfg.data, role):
-            raise ConfigError(f"data.{role}: không được rỗng")
+            raise ConfigError(f"data.{role}: must not be empty")
 
     overlap = sorted(set(cfg.data.source_domains) & set(cfg.data.target_domains))
     if overlap:
-        raise ConfigError(f"source_domains và target_domains trùng nhau: {overlap}")
+        raise ConfigError(f"source_domains and target_domains overlap: {overlap}")
 
     if not cfg.branches:
-        raise ConfigError("branches: cần ít nhất một nhánh")
+        raise ConfigError("branches: at least one branch is required")
 
     names = [b.name for b in cfg.branches]
     dup = sorted({n for n in names if names.count(n) > 1})
     if dup:
-        raise ConfigError(f"branches: tên trùng nhau {dup}")
+        raise ConfigError(f"branches: duplicate names {dup}")
 
     for b in cfg.branches:
         if b.steps_per_macro < 1:
             raise ConfigError(
-                f"branches[{b.name}].steps_per_macro: cần >= 1, nhận {b.steps_per_macro}"
+                f"branches[{b.name}].steps_per_macro: must be >= 1, got {b.steps_per_macro}"
             )
         if b.warmup_steps < 0:
-            raise ConfigError(f"branches[{b.name}].warmup_steps: cần >= 0")
+            raise ConfigError(f"branches[{b.name}].warmup_steps: must be >= 0")
         if not 0.0 <= b.pseudo_label.threshold <= 1.0:
-            raise ConfigError(f"branches[{b.name}].pseudo_label.threshold: cần trong [0, 1]")
+            raise ConfigError(f"branches[{b.name}].pseudo_label.threshold: must be within [0, 1]")
 
     if cfg.cotrain.total_macro_steps < 1:
-        raise ConfigError("cotrain.total_macro_steps: cần >= 1")
+        raise ConfigError("cotrain.total_macro_steps: must be >= 1")

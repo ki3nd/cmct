@@ -3,3 +3,9 @@ dir: domainnet
 domains: [clipart, infograph, painting, quickdraw, real, sketch]
 num_classes: 345
 layout: image_list
+
+# Applied in a fixed order: Resize -> crop -> hflip -> ToTensor -> Normalize.
+transform:
+  interpolation: bilinear
+  train: {resize: [256, 256], crop: random, crop_size: 224, hflip: true}
+  test: {resize: [224, 224], crop: none, crop_size: 224, hflip: false}

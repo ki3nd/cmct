@@ -3,3 +3,10 @@ dir: visda17
 domains: [synthetic, real]
 num_classes: 12
 layout: image_list
+
+# VisDA differs from the other datasets: resize straight to 224 then center-crop
+# (a no-op at that size), rather than resize to 256 and random-crop.
+transform:
+  interpolation: bilinear
+  train: {resize: [224, 224], crop: center, crop_size: 224, hflip: true}
+  test: {resize: [224, 224], crop: center, crop_size: 224, hflip: false}

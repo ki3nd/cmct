@@ -10,6 +10,7 @@ from cmct.config.schema import (
     BranchConfig,
     Config,
     CoTrainConfig,
+    CropSpec,
     DataConfig,
     DatasetSpec,
     DebiasConfig,
@@ -18,11 +19,12 @@ from cmct.config.schema import (
     PseudoLabelConfig,
     RunConfig,
     StreamConfig,
+    TransformSpec,
 )
 
 __all__ = [
     "BackboneConfig", "BranchConfig", "Config", "ConfigError", "CoTrainConfig",
     "DataConfig", "DatasetSpec", "DebiasConfig", "EmaConfig", "OptimConfig",
-    "PseudoLabelConfig", "RunConfig", "StreamConfig",
+    "CropSpec", "PseudoLabelConfig", "RunConfig", "StreamConfig", "TransformSpec",
     "dump", "load_experiment", "load_resolved", "validate",
 ]

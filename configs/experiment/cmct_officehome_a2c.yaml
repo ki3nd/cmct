@@ -4,7 +4,7 @@ data:
   root: /home/pc1175/DA-Research/data_root
   source_domains: [art]
   target_domains: [clipart]
-  batch_size_test: 100
+  batch_size_test: 128
   num_workers_test: 8
   clarify_classnames: false
 

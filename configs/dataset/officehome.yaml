@@ -3,7 +3,13 @@ dir: office_home
 domains: [art, clipart, product, real_world]
 num_classes: 65
 layout: class_folder
-image_size: 224
+
+# Applied in a fixed order: Resize -> crop -> hflip -> ToTensor -> Normalize.
+transform:
+  interpolation: bilinear
+  train: {resize: [256, 256], crop: random, crop_size: 224, hflip: true}
+  test: {resize: [224, 224], crop: none, crop_size: 224, hflip: false}
+
 pixel_mean: [0.48145466, 0.4578275, 0.40821073]
 pixel_std: [0.26862954, 0.26130258, 0.27577711]
 
