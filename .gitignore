@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+outputs/
+*.pt
+*.pth
+!src/cmct/backbones/clip/assets/*.gz
+.pytest_cache/
+.ruff_cache/
+docs/
