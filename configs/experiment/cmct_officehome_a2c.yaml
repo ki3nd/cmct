@@ -1,0 +1,99 @@
+dataset: officehome
+
+data:
+  root: /home/pc1175/DA-Research/data_root
+  source_domains: [art]
+  target_domains: [clipart]
+  batch_size_test: 100
+  num_workers_test: 8
+  clarify_classnames: false
+
+cotrain:
+  total_macro_steps: 1000
+  # macro: the cross-teaching reference is computed once per macro-step
+  # micro: recomputed at every branch step
+  cross_ref_refresh: macro
+  ensemble: mean_prob
+
+branches:
+  - name: lora
+    type: lora_clip
+    backbone:
+      checkpoint: assets/ViT-B-16.pt
+      dtype: fp16
+    stream:
+      batch_size_x: 32
+      batch_size_u: 32
+      num_workers: 8
+      strong_aug: false
+    optim:
+      lr: 0.0035
+      momentum: 0.9
+      weight_decay: 0.0005
+      grad_clip: 20.0
+      scheduler: cosine
+      warmup_lr: 0.001
+    ema:
+      momentum: 0.996
+      schedule: const
+    pseudo_label:
+      threshold: 0.85
+      self_reduce: mask
+      cross_reduce: mask
+    steps_per_macro: 1
+    warmup_steps: 50
+    cross_weight: 0.5
+    cross_mode: mask
+    extra:
+      mmd_weight: 1.0
+      lora_rank: 2
+      lora_alpha: 1.0
+      lora_dropout: 0.0
+      lora_params: [q, k, v, o]
+      lora_encoder: both
+      lora_rank_ramp: [2, 4, 6, 8, 10]
+
+  - name: vlp
+    type: vlp_clip
+    backbone:
+      checkpoint: assets/ViT-B-16.pt
+      dtype: fp32
+    stream:
+      batch_size_x: 32
+      batch_size_u: 32
+      num_workers: 8
+      strong_aug: false
+    optim:
+      lr: 0.000003
+      momentum: 0.9
+      weight_decay: 0.0005
+      nesterov: true
+      scheduler: inv
+      gamma: 0.0003
+      decay: 0.75
+      param_group_multipliers:
+        classifier: 1000.0
+    ema:
+      momentum: 0.99
+      schedule: dacs
+    pseudo_label:
+      threshold: 0.85
+      self_reduce: mask
+      cross_reduce: mask
+    steps_per_macro: 10
+    warmup_steps: 500
+    cross_weight: 0.5
+    cross_mode: mask
+    extra:
+      label_smoothing: 0.1
+      lambda1: 0.25
+      lambda2: 0.1
+      lambda3: 0.025
+      self_from_teacher: false
+
+run:
+  output_dir: outputs/officehome_a2c
+  seed: 42
+  device: cuda:0
+  print_freq: 50
+  eval_freq: 200

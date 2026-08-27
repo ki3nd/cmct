@@ -31,6 +31,8 @@ packages = ["src/cmct"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+# Vendored upstream CLIP: kept byte-identical, so it is not ours to lint.
+extend-exclude = ["src/cmct/backbones/clip/model.py", "src/cmct/backbones/clip/tokenizer.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

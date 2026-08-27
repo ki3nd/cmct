@@ -1,0 +1,5 @@
+name: domainnet
+dir: domainnet
+domains: [clipart, infograph, painting, quickdraw, real, sketch]
+num_classes: 345
+layout: image_list

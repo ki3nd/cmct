@@ -1,0 +1,5 @@
+name: office31
+dir: office31
+domains: [amazon, dslr, webcam]
+num_classes: 31
+layout: class_folder

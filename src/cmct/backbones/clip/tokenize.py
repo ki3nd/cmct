@@ -4,7 +4,7 @@ The rest of that file (model URLs, downloading, TorchScript patching, the
 `preprocess` transform) is not vendored -- this project loads a local
 checkpoint and builds its own transforms.
 """
-from typing import List, Union
+from __future__ import annotations
 
 import torch
 
@@ -13,13 +13,13 @@ from cmct.backbones.clip.tokenizer import SimpleTokenizer as _Tokenizer
 _tokenizer = _Tokenizer()
 
 
-def tokenize(texts: Union[str, List[str]], context_length: int = 77,
+def tokenize(texts: str | list[str], context_length: int = 77,
              truncate: bool = False) -> torch.LongTensor:
     """Returns the tokenized representation of given input string(s).
 
     Parameters
     ----------
-    texts : Union[str, List[str]]
+    texts : str | list[str]
         An input string or a list of input strings to tokenize
     context_length : int
         The context length to use; all CLIP models use 77 as the context length

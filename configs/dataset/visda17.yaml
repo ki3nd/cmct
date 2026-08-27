@@ -1,0 +1,5 @@
+name: visda17
+dir: visda17
+domains: [synthetic, real]
+num_classes: 12
+layout: image_list
