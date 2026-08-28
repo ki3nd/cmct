@@ -97,6 +97,17 @@ branches:
     cross_weight: 0.0
     cross_mode: mask
     extra:
+      # What produces pseudo-labels while this branch is in warmup.
+      #   zero_shot -- a frozen zero-shot CLIP, handing over to the teacher when
+      #                warmup ends. What the reference does; keep this to
+      #                reproduce it.
+      #   teacher   -- the EMA teacher from step 0, and no frozen model is built.
+      #                Defensible because the teacher is still ~60% its own
+      #                initialization at step 50 under a flat 0.99, and that
+      #                initialization reproduces zero-shot CLIP -- so it is
+      #                approximately the frozen model plus what the student has
+      #                learned. An extension, not parity.
+      warmup_reference: zero_shot
       mmd_weight: 1.0
       lora_rank: 2
       lora_alpha: 1.0

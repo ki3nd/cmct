@@ -51,8 +51,21 @@ from cmct.losses import LoraBranchLoss
 BRANCH_TYPE = "lora_clip"
 EXTRA_KEYS = {
     "mmd_weight", "lora_rank", "lora_alpha", "lora_dropout", "lora_params",
-    "lora_encoders", "lora_positions", "lora_rank_ramp",
+    "lora_encoders", "lora_positions", "lora_rank_ramp", "warmup_reference",
 }
+
+WARMUP_REFERENCES = ("zero_shot", "teacher")
+"""What produces pseudo-labels while the branch is in warmup.
+
+"zero_shot": a frozen zero-shot CLIP, replaced by the teacher when warmup ends.
+This is what the reference does, and the default in the shipped config.
+
+"teacher": the EMA teacher from step 0, and no frozen model is built at all. The
+teacher is a reasonable reference this early precisely because it is still mostly
+its own initialization, which reproduces zero-shot CLIP -- ~60% of it at step 50
+under a flat 0.99 -- while also carrying what the student has learned. An
+extension, not parity: the reference implements only "zero_shot".
+"""
 
 LAST_MODEL: LoraModel | None = None
 """The model from the most recent run, so a test can inspect it afterwards. Not
@@ -151,7 +164,13 @@ def read_extra(branch: BranchConfig) -> dict:
         raise SystemExit(
             f"branches[{branch.name}].extra: missing key(s) {missing}"
         )
-    return dict(branch.extra)
+    extra = dict(branch.extra)
+    if extra["warmup_reference"] not in WARMUP_REFERENCES:
+        raise SystemExit(
+            f"branches[{branch.name}].extra.warmup_reference: "
+            f"{extra['warmup_reference']!r} is not one of {list(WARMUP_REFERENCES)}"
+        )
+    return extra
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -211,10 +230,12 @@ def main(argv: list[str] | None = None) -> float:
         rank_ramp=extra["lora_rank_ramp"], positions=extra["lora_positions"],
         encoders=tuple(extra["lora_encoders"]), param_dtype=param_dtype,
     ).to(device)
-    if warmup_steps > 0:
+    uses_zero_shot = warmup_steps > 0 and extra["warmup_reference"] == "zero_shot"
+    if uses_zero_shot:
         # A second read of the checkpoint, not a copy of the student: apply_lora
         # mutated the student in place, and LoraModel rejects a model that
-        # already carries LoRA.
+        # already carries LoRA. Under warmup_reference "teacher" this is skipped
+        # entirely -- it is a whole extra CLIP on the device that nothing reads.
         model.attach_zero_shot(
             load_clip(branch.backbone.checkpoint, branch.backbone.dtype).to(device)
         )
@@ -240,6 +261,7 @@ def main(argv: list[str] | None = None) -> float:
         "images": f"{len(split.train_x)} source / {len(split.train_u)} target "
                   f"/ {len(split.test)} test",
         "classes": split.num_classes,
+        "warmup_reference": extra["warmup_reference"],
         "prompt_template": TEMPLATE,
         "prompt_examples": [TEMPLATE.format(c) for c in split.classnames[:3]],
         "trainable_parameters": trainable,
@@ -279,7 +301,7 @@ def main(argv: list[str] | None = None) -> float:
         batch = stream.next().to(device)
 
         in_warmup = step < warmup_steps
-        if in_warmup:
+        if in_warmup and uses_zero_shot:
             reference_logits = model.zero_shot_logits(batch.img_u)
             reference_name = "zero_shot"
         else:
@@ -310,7 +332,7 @@ def main(argv: list[str] | None = None) -> float:
         scheduler.step()
         model.ema_update(ema_momentum(step, branch.ema))
 
-        if in_warmup and step + 1 == warmup_steps:
+        if uses_zero_shot and in_warmup and step + 1 == warmup_steps:
             model.release_zero_shot()
 
         current_lr = lr_at(step, branch.optim, total_steps, branch.warmup_steps)

@@ -368,3 +368,155 @@ def test_the_teacher_keeps_99_percent_of_its_initialization_after_one_step(tiny_
         share = (teacher[key] - init[key]).norm().item() / span[key]
         assert share == pytest.approx(0.01, abs=2e-3), \
             f"{key}: teacher moved {share:.4f} of the way to the student, expected 0.01"
+
+
+def set_warmup_reference(config_path, value, **run):
+    raw = yaml.safe_load(config_path.read_text())
+    raw["branches"][0]["extra"]["warmup_reference"] = value
+    raw["run"].update(run)
+    config_path.write_text(yaml.safe_dump(raw))
+    return raw
+
+
+def test_teacher_reference_reports_teacher_inside_the_warmup_window(tiny_run):
+    """warmup_steps is 2; eval_freq 1 puts evaluations INSIDE warmup, which is the
+    only place the two settings differ. With eval_freq 3 every row is already
+    past the boundary and the test would pass either way."""
+    config_path, output_dir = tiny_run
+    set_warmup_reference(config_path, "teacher", eval_freq=1)
+
+    train_lora.main(["--config", str(config_path)])
+
+    recorded = rows(output_dir)
+    inside = [r for r in recorded if r["step"] <= 2]
+    assert inside, "no evaluation landed inside warmup; this test proves nothing"
+    assert all(r["reference"] == "teacher" for r in recorded), \
+        [(r["step"], r["reference"]) for r in recorded]
+
+
+def test_zero_shot_reference_still_reports_zero_shot_inside_warmup(tiny_run):
+    """The other half of the pair: the same run under the default setting must
+    disagree, or the two settings are not actually distinguishable."""
+    config_path, output_dir = tiny_run
+    set_warmup_reference(config_path, "zero_shot", eval_freq=1)
+
+    train_lora.main(["--config", str(config_path)])
+
+    inside = {r["step"]: r["reference"] for r in rows(output_dir) if r["step"] <= 2}
+    assert inside, "no evaluation landed inside warmup"
+    assert set(inside.values()) == {"zero_shot"}, inside
+
+
+def test_teacher_reference_builds_no_zero_shot_model(tiny_run, monkeypatch):
+    """The point of the setting beyond the pseudo-labels: a whole extra CLIP is
+    never read and never placed on the device."""
+    config_path, _ = tiny_run
+    set_warmup_reference(config_path, "teacher")
+
+    from conftest import build_tiny_clip
+    calls = []
+
+    def counting_load_clip(checkpoint, dtype):
+        calls.append(checkpoint)
+        return build_tiny_clip()
+
+    monkeypatch.setattr(train_lora, "load_clip", counting_load_clip)
+    train_lora.main(["--config", str(config_path)])
+
+    assert len(calls) == 1, f"load_clip called {len(calls)} times, expected 1"
+    assert train_lora.LAST_MODEL.has_zero_shot is False
+
+
+def test_zero_shot_reference_builds_one(tiny_run, monkeypatch):
+    config_path, _ = tiny_run
+    set_warmup_reference(config_path, "zero_shot")
+
+    from conftest import build_tiny_clip
+    calls = []
+    monkeypatch.setattr(train_lora, "load_clip",
+                        lambda checkpoint, dtype: (calls.append(checkpoint),
+                                                   build_tiny_clip())[1])
+    train_lora.main(["--config", str(config_path)])
+
+    assert len(calls) == 2, f"load_clip called {len(calls)} times, expected 2"
+
+
+def test_warmup_still_flattens_the_lr_under_the_teacher_reference(tiny_run):
+    """warmup_steps keeps its other job under both settings, so the boundary is
+    still a real event and still earns its off-cadence evaluation."""
+    config_path, output_dir = tiny_run
+    set_warmup_reference(config_path, "teacher")
+
+    train_lora.main(["--config", str(config_path)])
+
+    derived = json.loads((output_dir / "run.json").read_text())
+    assert derived["warmup_reference"] == "teacher"
+    assert derived["warmup_steps"] == 2
+    recorded = rows(output_dir)
+    assert 2 in [r["step"] for r in recorded], "boundary not evaluated"
+    boundary = next(r for r in recorded if r["step"] == 2)
+    assert boundary["at_warmup_end"] is True
+
+    # lr_at holds warmup_lr through the boundary step itself -- the reference's
+    # own off-by-one -- so the flat phase is checked at the boundary and the
+    # decay at the end of the run.
+    assert boundary["lr"] == pytest.approx(derived["lr_first_last"][0])
+    assert recorded[-1]["lr"] < derived["lr_first_last"][0]
+
+
+def test_an_unknown_warmup_reference_is_rejected(tiny_run):
+    config_path, _ = tiny_run
+    set_warmup_reference(config_path, "frozen_clip")
+
+    with pytest.raises(SystemExit) as caught:
+        train_lora.main(["--config", str(config_path)])
+
+    message = str(caught.value)
+    assert "warmup_reference" in message
+    assert "zero_shot" in message and "teacher" in message
+
+
+@pytest.mark.parametrize("reference", ["zero_shot", "teacher"])
+def test_the_teacher_is_ema_updated_during_warmup_under_both_settings(tiny_run,
+                                                                     reference):
+    """warmup_reference decides only WHICH model produces the probabilities while
+    the branch is in warmup. It does not gate the EMA.
+
+    The reference does not gate it either -- _ema_update_lora_params sits outside
+    every `if in_warmup1` in train_mfa_v2.py's loop, unlike sched1.step(), which
+    is gated. So the teacher keeps tracking the student throughout warmup, and by
+    the time it takes over it has already absorbed those steps. Gating the EMA
+    would leave it frozen at its initialization for the whole warmup and make the
+    handoff a cliff.
+    """
+    config_path, output_dir = tiny_run
+    set_warmup_reference(config_path, reference, eval_freq=1)
+
+    from cmct.branches.lora_model import LoraModel
+    captured = {}
+    original_init = LoraModel.__init__
+
+    def spy(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        captured["init"] = {k: v.clone()
+                            for k, v in self.teacher_lora_state_dict().items()}
+
+    LoraModel.__init__ = spy
+    try:
+        train_lora.main(["--config", str(config_path)])
+    finally:
+        LoraModel.__init__ = original_init
+
+    model = train_lora.LAST_MODEL
+    recorded = rows(output_dir)
+
+    # one update per step, warmup steps included
+    assert model.teacher_updates == 6
+    inside = [r for r in recorded if r["step"] <= 2]
+    assert inside, "no row from inside warmup"
+    assert [r["teacher_updates"] for r in inside] == [1, 2]
+
+    # and the teacher actually moved
+    init, teacher = captured["init"], model.teacher_lora_state_dict()
+    moved = max((teacher[k] - init[k]).norm().item() for k in init)
+    assert moved > 0, "the teacher never moved, so the EMA did not run"
