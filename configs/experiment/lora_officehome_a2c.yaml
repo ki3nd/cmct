@@ -1,0 +1,109 @@
+# Branch 1 alone on Office-Home art -> clipart: CLIP ViT-B/16 with LoRA on BOTH
+# towers, cosine-similarity classification, an EMA teacher, and MK-MMD.
+#
+# Values come from old-cmct/train.py:186-204 -- the only place they are set, with
+# no yaml overriding them -- and from train_mfa_v2.py's argparse defaults. Two
+# deliberate deviations, both noted where they appear: the EMA momentum is 0.99
+# rather than 0.996, and there is no cross-teaching term because this run has one
+# branch.
+#
+#   python -m cmct.train_lora --config configs/experiment/lora_officehome_a2c.yaml
+
+dataset: officehome
+
+data:
+  root: /home/pc1175/DA-Research/data_root
+  source_domains: [art]
+  target_domains: [clipart]
+  # The evaluation set is the target training images (transductive UDA), so this
+  # affects speed only, never the number.
+  batch_size_test: 128
+  num_workers_test: 8
+  # Off, and it must stay off to reproduce: it renames 21 classes, which changes
+  # the text prompts. Class names are normalized (underscores to spaces,
+  # lowercased) regardless -- that normalization is what produces the original's
+  # prompt list.
+  clarify_classnames: false
+
+cotrain:
+  # 1000 x 1: one branch step per macro-step, so "step" means one thing here.
+  total_macro_steps: 1000
+  # Unused with a single branch -- there is no other teacher to read. Required by
+  # the schema so a co-training run cannot leave it unstated.
+  cross_ref_refresh: macro
+  ensemble: mean_prob
+
+branches:
+  - name: lora
+    type: lora_clip
+    backbone:
+      # fp16, matching PREC="fp16": load_clip skips .float(), so 195 tensors stay
+      # float16 and 107 (embeddings, LayerNorm, positional, logit_scale) stay
+      # float32. The LoRA factors are float32 regardless of this -- a float16 EMA
+      # stops moving within ~100 steps, measured.
+      checkpoint: ViT-B/16
+      dtype: fp16
+    stream:
+      batch_size_x: 32
+      batch_size_u: 32
+      num_workers: 8
+      # Not implemented; setting it raises rather than silently doing nothing.
+      strong_aug: false
+    optim:
+      # `lr` DOES NOT GOVERN THE LEARNING RATE HERE. With warmup_cosine and
+      # warmup_steps > 0 the cosine's amplitude is warmup_lr, because
+      # CosineAnnealingLR scales the group's current lr recursively rather than
+      # reading base_lrs, and the reference overwrites that lr with warmup_lr on
+      # every warmup step. Measured: step 51 runs at 9.999973e-04, not
+      # 3.499990e-03. It is kept because it is the value the reference passes to
+      # the optimizer constructor -- deleting it would hide that the two differ
+      # by 3.5x. The effective schedule is 1.0e-03 flat through step 50, then a
+      # cosine decay to 2.7e-09 at step 999.
+      lr: 0.0035
+      warmup_lr: 0.001
+      momentum: 0.9
+      weight_decay: 0.0005
+      nesterov: false
+      grad_clip: 20.0
+      scheduler: warmup_cosine
+    ema:
+      # 0.99, the schema default. The reference used 0.996 (train.py:202,
+      # --s1-ema-momentum) -- a deliberate deviation.
+      momentum: 0.99
+      # Constant from step 1; step 0 is a hard copy under every schedule, so the
+      # teacher never carries the student's initialization.
+      schedule: const
+    pseudo_label:
+      threshold: 0.85
+      self_reduce: mask
+      # Unused: this run has no cross term.
+      cross_reduce: mask
+    steps_per_macro: 1
+    # The reference's --s1-warmup-iters. Through these steps the pseudo-label
+    # reference is the frozen zero-shot CLIP; afterwards it is the EMA teacher,
+    # and the zero-shot model is released.
+    warmup_steps: 50
+    cross_weight: 0.0
+    cross_mode: mask
+    extra:
+      mmd_weight: 1.0
+      lora_rank: 2
+      lora_alpha: 1.0
+      # DROPOUT_RATE, not DROPOUT (which is 0.0 and read by nobody).
+      lora_dropout: 0.25
+      # q, k, v only -- out_proj never takes a LoRA delta.
+      lora_params: [q, k, v]
+      # Both towers. The text tower holds 774,144 of the 1,935,360 trainable
+      # parameters, which is why text features are recomputed every forward.
+      lora_encoders: [text, vision]
+      lora_positions: all
+      # Ascending rank by depth: 2,2,4,4,8,8,16,16,32,32,64,64 for the 12 blocks.
+      lora_rank_ramp: [2, 4, 6, 8, 10]
+
+run:
+  output_dir: outputs/lora_officehome_a2c
+  seed: 42
+  device: cuda:0
+  print_freq: 50
+  # 20 evaluations over 1000 steps.
+  eval_freq: 50

@@ -398,3 +398,20 @@ def test_model_is_picklable_and_deepcopyable(model):
     clone.train()
     assert all(not m.training for m in clone.teacher.modules())
     assert clone.teacher is not model.teacher
+
+
+def test_param_dtype_must_match_the_clip_it_is_given(tiny_clip):
+    """One config field reaches the model through two paths -- load_clip() for the
+    whole CLIP and param_dtype for the LoRA layers. A mismatch used to surface as
+    a bare `mat1 and mat2 must have the same dtype` mid-forward, naming neither
+    the field nor the file."""
+    with pytest.raises(TypeError, match="branches\\[\\].backbone.dtype"):
+        build(tiny_clip, param_dtype=torch.float16)
+
+
+def test_matching_fp16_is_accepted(tiny_clip):
+    model = build(tiny_clip.half(), param_dtype=torch.float16)
+    from cmct.backbones.lora import LoRALinear
+    layer = next(m for m in model.student.modules() if isinstance(m, LoRALinear))
+    assert layer.weight.dtype is torch.float16
+    assert layer.lora_A.dtype is torch.float32

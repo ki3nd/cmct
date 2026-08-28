@@ -52,6 +52,17 @@ class LoraModel(nn.Module):
         self.classnames = list(classnames)
         self.num_classes = len(classnames)
 
+        clip_dtype = clip_model.visual.conv1.weight.dtype
+        if clip_dtype is not param_dtype:
+            raise TypeError(
+                f"param_dtype is {param_dtype} but the CLIP handed in is "
+                f"{clip_dtype}. These come from one config field "
+                f"(branches[].backbone.dtype) through two separate paths -- "
+                f"load_clip() for the whole model and param_dtype for the LoRA "
+                f"layers -- so a mismatch means one of them was not updated. "
+                f"Left alone it fails mid-forward with a bare dtype error."
+            )
+
         self.student = clip_model
         apply_lora(self.student, rank=rank, alpha=alpha, dropout=dropout,
                    params=params, rank_ramp=rank_ramp, positions=positions,
