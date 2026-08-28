@@ -34,7 +34,9 @@ branches:
       scheduler: cosine
       warmup_lr: 0.001
     ema:
-      momentum: 0.996
+      # 0.99, the schema default. The codebase this comes from used 0.996
+      # (train.py:202, --s1-ema-momentum) -- this is a deliberate deviation.
+      momentum: 0.99
       schedule: const
     pseudo_label:
       threshold: 0.85
@@ -49,7 +51,10 @@ branches:
       lora_rank: 2
       lora_alpha: 1.0
       lora_dropout: 0.0
-      lora_params: [q, k, v, o]
+      # q, k, v only -- NOT o, so out_proj keeps no LoRA. The wrapper class
+      # defaults to ['q','k','v','o'], but both trainer configs pass
+      # ['q','k','v'], and a class default is not a configuration.
+      lora_params: [q, k, v]
       lora_encoder: both
       lora_rank_ramp: [2, 4, 6, 8, 10]
 
