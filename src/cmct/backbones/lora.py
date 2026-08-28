@@ -33,9 +33,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-PARAM_NAMES = ("q", "k", "v", "o")
-"""Which attention projections can take a LoRA delta. The configuration this
-reproduces uses ("q", "k", "v") -- `o` is available but unused there."""
+PARAM_NAMES = ("q", "k", "v")
+"""The attention projections that can take a LoRA delta. out_proj never does:
+the reference implementation's wrapper class defaults to including it, but both
+of its trainer configs pass ('q', 'k', 'v'), and a class default is not a
+configuration."""
 
 POSITIONS: dict[str, list[int]] = {
     "all": list(range(12)),
@@ -184,8 +186,7 @@ class MultiheadAttentionLoRA(nn.Module):
             out.weight.copy_(mha.out_proj.weight.detach())
             if out.bias is not None:
                 out.bias.copy_(mha.out_proj.bias.detach())
-        built["o"] = self._maybe_lora(out, "o" in params, rank, alpha, dropout,
-                                      param_dtype)
+        built["o"] = self._maybe_lora(out, False, rank, alpha, dropout, param_dtype)
 
         self.q_proj, self.k_proj, self.v_proj, self.out_proj = (
             built["q"], built["k"], built["v"], built["o"]
