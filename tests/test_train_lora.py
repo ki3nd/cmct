@@ -14,7 +14,9 @@ import yaml
 
 from cmct import train_lora
 from cmct.config import load_experiment
+from cmct.config.schema import EmaConfig
 from cmct.engine import lr_at
+from cmct.engine.evaluator import EvalResult
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 EXPERIMENT = CONFIGS / "experiment" / "lora_officehome_a2c.yaml"
@@ -93,13 +95,15 @@ def test_both_teacher_and_student_are_scored(tiny_run):
 
 
 def test_the_reference_switches_after_warmup(tiny_run):
-    """warmup_steps is 2 here, and evaluation lands on steps 3 and 6, so every
-    recorded row should already be past the switch."""
+    """warmup_steps is 2, and evaluation lands on steps 2 (the boundary), 3 and
+    6. Step 2 is the LAST warmup step, so it still reports the zero-shot
+    reference; everything after it reports the teacher."""
     config_path, output_dir = tiny_run
     train_lora.main(["--config", str(config_path)])
     recorded = rows(output_dir)
-    assert all(r["reference"] == "teacher" for r in recorded), \
-        [(r["step"], r["reference"]) for r in recorded]
+    seen = {r["step"]: r["reference"] for r in recorded}
+    assert seen[2] == "zero_shot", seen
+    assert all(ref == "teacher" for step, ref in seen.items() if step > 2), seen
 
 
 def test_the_reference_is_the_zero_shot_model_during_warmup(tiny_run):
@@ -221,3 +225,146 @@ def test_rejects_a_branch_of_the_wrong_type(tiny_run):
     config_path, _ = tiny_run
     with pytest.raises(SystemExit, match="no branch named"):
         train_lora.main(["--config", str(config_path), "--branch", "vlp"])
+
+
+def test_a_tie_keeps_the_EARLIER_of_two_equally_good_models(tiny_run, monkeypatch):
+    """The save guard is strict and evaluated before `best` is updated, which is
+    the reference's guard (train_mfa_v2.py uses `>`).
+
+    `teacher.accuracy >= best` AFTER the update is not the always-true guard it
+    looks like -- `best` is only raised when the accuracy improved, so the two
+    agree on every case except a tie, where `>=` replaces the earlier of two
+    equally good models with the later one. This test is the tie.
+    """
+    config_path, output_dir = tiny_run
+    # three evaluations now (the warmup boundary, the cadence, the last step),
+    # two calls each; every teacher score identical, so only the first can save
+    scores = iter([70.0] * 6)
+    monkeypatch.setattr(train_lora, "evaluate", lambda fn, loader, device:
+                        EvalResult(next(scores), 0.0, 0, 1))
+
+    best = train_lora.main(["--config", str(config_path)])
+
+    assert best == pytest.approx(70.0)
+    saved = torch.load(output_dir / "model-best.pt", weights_only=True)
+    last = torch.load(output_dir / "model-last.pt", weights_only=True)
+    assert any(not torch.equal(saved[k], last[k]) for k in saved), \
+        "the tie rewrote model-best.pt with the later model"
+
+
+def test_the_saved_checkpoint_is_the_teacher(tiny_run):
+    """Evaluation scores the teacher and `best` follows it, so the checkpoint has
+    to be the teacher's factors -- the reference saves lora1_t. Saving the
+    student stores a model whose accuracy was never measured."""
+    config_path, output_dir = tiny_run
+    train_lora.main(["--config", str(config_path)])
+    model = train_lora.LAST_MODEL
+
+    saved = torch.load(output_dir / "model-last.pt", weights_only=True)
+    teacher = model.teacher_lora_state_dict()
+    student = model.lora_state_dict()
+
+    assert set(saved) == set(teacher)
+    assert all(torch.equal(saved[k], teacher[k]) for k in saved)
+    assert any(not torch.equal(student[k], teacher[k]) for k in saved), \
+        "student and teacher are identical, so this test cannot tell them apart"
+
+
+def test_the_warmup_boundary_is_always_evaluated(tiny_run):
+    """The step where the pseudo-label reference switches from the frozen
+    zero-shot model to the EMA teacher gets an evaluation of its own, off the
+    cadence -- the reference does the same and tags it "end of s1 warmup"
+    (train_mfa_v2.py:968). It is the number that says whether warmup was long
+    enough. Here warmup ends at 2 and eval_freq is 3, so nothing else would
+    evaluate there.
+    """
+    config_path, output_dir = tiny_run
+    train_lora.main(["--config", str(config_path)])
+
+    recorded = rows(output_dir)
+    steps = [r["step"] for r in recorded]
+    assert 2 in steps, f"warmup boundary not evaluated; evaluated at {steps}"
+    assert 2 % 3 != 0, "eval_freq would have covered it anyway; test proves nothing"
+
+    boundary = next(r for r in recorded if r["step"] == 2)
+    assert boundary["at_warmup_end"] is True
+    assert all(r["at_warmup_end"] is False for r in recorded if r["step"] != 2)
+
+
+def test_no_boundary_evaluation_when_there_is_no_warmup(tiny_run):
+    config_path, output_dir = tiny_run
+    raw = yaml.safe_load(config_path.read_text())
+    raw["branches"][0]["warmup_steps"] = 0
+    config_path.write_text(yaml.safe_dump(raw))
+
+    train_lora.main(["--config", str(config_path)])
+
+    assert all(r["at_warmup_end"] is False for r in rows(output_dir))
+
+
+def test_derived_evaluation_count_matches_what_happens(tiny_run):
+    """`evaluations` is printed before the run as a sanity check, so it has to
+    count the off-cadence boundary evaluation too."""
+    config_path, output_dir = tiny_run
+    train_lora.main(["--config", str(config_path)])
+    declared = json.loads((output_dir / "run.json").read_text())["evaluations"]
+    assert declared == len(rows(output_dir))
+
+
+def test_const_momentum_applies_from_step_zero():
+    """The reference applies its constant from step 0, so the teacher keeps the
+    SVD initialization -- which reproduces zero-shot CLIP -- and decays away from
+    it rather than discarding it. engine.ema.momentum_at returns 0.0 at step 0
+    for branch 2's sake; this branch overrides that one point, only for "const",
+    and leaves the shared function alone."""
+    cfg = EmaConfig(momentum=0.99, schedule="const")
+    assert [train_lora.ema_momentum(t, cfg) for t in range(3)] == [0.99, 0.99, 0.99]
+
+
+def test_ramp_still_hard_copies_at_step_zero():
+    """A ramp named in the config is a request for the hard copy its own formula
+    gives, min(0 / 1, m) == 0. The override must not reach it."""
+    cfg = EmaConfig(momentum=0.99, schedule="ramp")
+    assert train_lora.ema_momentum(0, cfg) == 0.0
+    assert train_lora.ema_momentum(1, cfg) == 0.5
+
+
+def test_the_teacher_keeps_99_percent_of_its_initialization_after_one_step(tiny_run):
+    """The point of the change, measured on the model rather than on the momentum:
+    after one step at momentum 0.99 the teacher's LoRA factors must have moved
+    exactly 1% of the way from their initial values to the student's stepped
+    ones. Under a step-0 hard copy they move 100%."""
+    config_path, _ = tiny_run
+    raw = yaml.safe_load(config_path.read_text())
+    raw["cotrain"]["total_macro_steps"] = 1
+    raw["branches"][0]["warmup_steps"] = 0
+    config_path.write_text(yaml.safe_dump(raw))
+
+    from cmct.branches.lora_model import LoraModel
+    captured = {}
+    original_init = LoraModel.__init__
+
+    def spy(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        captured["init"] = {k: v.clone()
+                            for k, v in self.teacher_lora_state_dict().items()}
+
+    LoraModel.__init__ = spy
+    try:
+        train_lora.main(["--config", str(config_path)])
+    finally:
+        LoraModel.__init__ = original_init
+
+    model = train_lora.LAST_MODEL
+    assert model.teacher_updates == 1
+    init = captured["init"]
+    teacher = model.teacher_lora_state_dict()
+    student = model.lora_state_dict()
+
+    span = {k: (student[k] - init[k]).norm().item() for k in init}
+    active = [k for k in init if span[k] > 1e-8]
+    assert active, "the student's factors did not move; this test cannot measure anything"
+    for key in active:
+        share = (teacher[key] - init[key]).norm().item() / span[key]
+        assert share == pytest.approx(0.01, abs=2e-3), \
+            f"{key}: teacher moved {share:.4f} of the way to the student, expected 0.01"

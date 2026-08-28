@@ -120,16 +120,22 @@ class LoraModel(nn.Module):
         return self.teacher.logit_scale.exp() * normalized @ text.t()
 
     def ema_update(self, momentum: float) -> None:
-        """LoRA parameters only.
+        """LoRA parameters only -- `w_lora_A` / `w_lora_B`, nothing else, which is
+        what the reference's `"lora_" in k` filter selects
+        (trainers/da/phpl_momentum.py:303, :351).
 
-        The first update replaces them outright, whatever momentum is passed:
-        until then the teacher holds the student's initialization, and at a high
-        momentum that would linger for thousands of steps.
+        `momentum` is applied as given, the first update included. The reference
+        has no first-update exception (_ema_update_lora_params is a plain
+        mul_/add_) and does not need one: the teacher starts holding the SVD
+        initialization, whose residual writeback makes the model reproduce
+        zero-shot CLIP rather than noise. Discarding it would throw away a
+        working model; decaying away from it is the point.
+
+        Branch 2 is the opposite case -- its head is random -- and keeps its own
+        first-update override. Do not copy that here.
         """
         if not 0.0 <= momentum <= 1.0:
             raise ValueError(f"momentum must be within [0, 1], got {momentum}")
-        if self.teacher_updates == 0:
-            momentum = 0.0
 
         teacher_state = self.teacher.state_dict()
         with torch.no_grad():
@@ -227,6 +233,13 @@ class LoraModel(nn.Module):
 
     def lora_state_dict(self) -> dict[str, Tensor]:
         return lora_state_dict(self.student)
+
+    def teacher_lora_state_dict(self) -> dict[str, Tensor]:
+        """The TEACHER's factors. This is what a checkpoint should hold: the
+        teacher is the model evaluation scores and the model the reference saves
+        (train_mfa_v2.py saves lora1_t), so saving the student would store a
+        model whose accuracy was never measured."""
+        return lora_state_dict(self.teacher)
 
     def load_lora_state_dict(self, state: dict[str, Tensor],
                              strict: bool = True) -> None:

@@ -220,14 +220,32 @@ def test_ema_touches_only_lora_parameters(model):
         assert torch.equal(value, after[key]), key
 
 
-def test_first_update_hard_copies_whatever_momentum_is_passed(model):
+def test_the_first_update_honours_the_momentum_like_every_other(model):
+    """No first-update exception, which is what the reference does
+    (_ema_update_lora_params is a plain mul_/add_ with no step branch).
+
+    The teacher starts holding the SVD initialization, and that initialization
+    reproduces zero-shot CLIP -- SoRA writes the residual back into the frozen
+    weight -- so it is a working model worth decaying away from rather than
+    noise worth discarding. An override here used to hard-copy at the first
+    update, which threw zero-shot CLIP away at step 0.
+    """
+    initial = {name: param.detach().clone()
+               for name, param in lora_parameters(model.teacher)}
     perturb_student_lora(model)
     assert model.teacher_updates == 0
     assert model.teacher_is_initialized is False
+
     model.ema_update(0.996)
+
     teacher_state = model.teacher.state_dict()
+    moved = False
     for name, param in lora_parameters(model.student):
-        assert torch.equal(param.detach(), teacher_state[name]), name
+        expected = 0.996 * initial[name] + 0.004 * param.detach()
+        assert torch.allclose(teacher_state[name], expected, rtol=1e-6), name
+        if not torch.allclose(initial[name], param.detach()):
+            moved = True
+    assert moved, "the student was not perturbed, so momentum 0.996 is untestable here"
     assert model.teacher_updates == 1
     assert model.teacher_is_initialized is True
 

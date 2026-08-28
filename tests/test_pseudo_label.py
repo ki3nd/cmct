@@ -124,3 +124,45 @@ def test_pass_fraction_takes_no_gradient():
     reference = MIXED.clone().requires_grad_(True)
     assert isinstance(pass_fraction(reference, 0.85), float)
     assert reference.grad is None
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("reduce", ["mask", "ratio"])
+def test_zero_not_nan_when_nothing_passes_at_any_dtype(dtype, reduce):
+    """The epsilon guard has to survive the dtype the branch actually runs at.
+
+    Built with .to(logits.dtype), the mask is fp16 under an fp16 backbone, and
+    fp16 cannot represent 1e-8: `0.0 + 1e-8` rounds to 0.0, so the guarded
+    division is 0.0 / 0.0 = NaN. One target batch with nothing over the
+    threshold then poisons every LoRA factor and the teacher through backward.
+    A float32 mask, which is what the reference uses, cannot underflow.
+    """
+    reference = torch.full((8, 5), 0.2)          # max prob 0.2, threshold 0.85
+    logits = torch.randn(8, 5, dtype=dtype)
+
+    loss = pseudo_label_ce(logits, reference, threshold=0.85, reduce=reduce)
+
+    assert not torch.isnan(loss), f"NaN at {dtype} with reduce={reduce!r}"
+    assert float(loss) == 0.0
+
+
+def test_the_masked_reduction_is_float32_under_an_fp16_backbone():
+    """Reducing in fp16 also costs precision when the mask is NOT empty: the
+    reference's .float() mask promotes the per-sample losses, so the sum and the
+    division happen at float32 regardless of the backbone."""
+    reference = torch.zeros(64, 4)
+    reference[:, 0] = 1.0                        # every sample passes
+    logits = torch.randn(64, 4, dtype=torch.float16) * 8.0
+
+    loss = pseudo_label_ce(logits, reference, threshold=0.85, reduce="mask")
+
+    assert loss.dtype is torch.float32
+
+    # The per-sample losses are still fp16 -- that is the backbone's precision,
+    # not this function's business. What the float32 mask buys is that summing 64
+    # of them and dividing does not happen in fp16.
+    per_sample = F.cross_entropy(logits, reference.argmax(-1), reduction="none")
+    assert per_sample.dtype is torch.float16
+    assert float(loss) == pytest.approx(float(per_sample.float().mean()), rel=1e-6)
+    assert float(loss) != pytest.approx(float(per_sample.mean()), rel=1e-9), \
+        "fp16 and fp32 reductions agree here, so this test proves nothing"

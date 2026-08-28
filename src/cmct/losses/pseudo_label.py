@@ -23,8 +23,8 @@ def pseudo_label_ce(logits: Tensor, reference: Tensor, threshold: float,
     argmax pseudo-label, and scales by the FRACTION that pass. Smoother and lower
     variance, but the term shrinks in proportion.
 
-    Both are exactly 0 when nothing passes. The reference is detached: it is a
-    target, never a path for gradients.
+    Both are exactly 0 when nothing passes -- at ANY logits dtype; see the mask
+    below. The reference is detached: it is a target, never a path for gradients.
     """
     if not 0.0 <= threshold <= 1.0:
         raise ValueError(f"threshold must be within [0, 1], got {threshold}")
@@ -33,7 +33,14 @@ def pseudo_label_ce(logits: Tensor, reference: Tensor, threshold: float,
 
     reference = reference.detach()
     confidence, labels = torch.max(reference, dim=-1)
-    mask = confidence.ge(threshold).to(logits.dtype)
+    # float32, NOT logits.dtype. Under fp16 logits the epsilon below underflows
+    # (fp16: 0.0 + 1e-8 == 0.0), so a batch where nothing clears the threshold
+    # divides 0.0 by 0.0 and returns NaN instead of 0 -- which then propagates
+    # through backward into every LoRA factor and the teacher, permanently. The
+    # reference builds the mask with .float() for the same reason
+    # (trainers/da/phpl_momentum.py:779). fp16 per-sample losses promote to
+    # float32 against it, so the reduction below is fp32 either way.
+    mask = confidence.ge(threshold).float()
 
     if reduce == "ratio":
         return F.cross_entropy(logits, labels) * mask.mean()

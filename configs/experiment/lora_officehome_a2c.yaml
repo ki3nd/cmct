@@ -67,11 +67,22 @@ branches:
       grad_clip: 20.0
       scheduler: warmup_cosine
     ema:
-      # 0.99, the schema default. The reference used 0.996 (train.py:202,
-      # --s1-ema-momentum) -- a deliberate deviation.
+      # 0.99 is the reference's effective value, not a deviation: argparse
+      # defaults to 0.996 (train_mfa_v2.py --s1-ema-momentum) but
+      # configs/mfa/hparams_v2.yaml's `s1.ema_momentum: 0.99` overrides it.
       momentum: 0.99
-      # Constant from step 1; step 0 is a hard copy under every schedule, so the
-      # teacher never carries the student's initialization.
+      # A flat constant from step 0, which is what the reference does
+      # (train_mfa_v2.py:943 passes `lambda k: args.s1_ema_momentum`, and
+      # _ema_update_lora_params has no first-step branch). The teacher therefore
+      # starts as the SVD initialization -- which reproduces zero-shot CLIP,
+      # since the residual is written back into the frozen weight -- and decays
+      # away from it: still ~60% zero-shot at step 50, ~37% at 100. That is what
+      # makes the end of warmup continuous, where the pseudo-label source
+      # switches from the frozen zero-shot model to this teacher.
+      #
+      # "ramp" is the other option, min(t / (t + 1), momentum), which hard-copies
+      # at step 0. Branch 2 needs it because its head is random; this branch does
+      # not, and its reference does not use it.
       schedule: const
     pseudo_label:
       threshold: 0.85
@@ -104,6 +115,6 @@ run:
   output_dir: outputs/lora_officehome_a2c
   seed: 42
   device: cuda:0
-  print_freq: 50
+  print_freq: 10
   # 20 evaluations over 1000 steps.
   eval_freq: 50

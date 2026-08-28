@@ -59,9 +59,51 @@ LAST_MODEL: LoraModel | None = None
 part of what main() returns."""
 
 
+def ema_momentum(step: int, cfg) -> float:
+    """This branch's EMA momentum, which differs from engine.ema.momentum_at at
+    exactly one point: step 0 under the "const" schedule.
+
+    momentum_at returns 0.0 at step 0 under every schedule, so the teacher throws
+    its initialization away and restarts from the stepped student. That is right
+    for branch 2, whose head is randomly initialized, and wrong here. This
+    branch's initialization is zero-shot CLIP: SoRA's SVD init puts the top-r
+    principal components of each weight into the LoRA factors and subtracts the
+    residual back out of the frozen weight, so `frozen + scaling * B @ A`
+    reconstructs the original weight (measured: 1.5e-08 max difference, and the
+    model's output matches zero-shot CLIP to 2.4e-07). The factors themselves are
+    NOT zero -- |A|max and |B|max are around 0.6 -- so the usual LoRA argument
+    that a zero-initialized delta makes the starting point irrelevant does not
+    apply.
+
+    The reference therefore applies its constant from step 0
+    (train_mfa_v2.py:943 passes `lambda k: args.s1_ema_momentum`, and
+    _ema_update_lora_params has no first-step branch), leaving the teacher 99%
+    zero-shot after step 0 and ~60% after 50 steps. That is also what makes the
+    end of warmup continuous: the pseudo-label source switches from the frozen
+    zero-shot model to a teacher still mostly made of it.
+
+    Only "const" is overridden. "ramp" is min(step / (step + 1), momentum), which
+    is 0 at step 0 by its own formula, and a ramp asked for by name is a request
+    for that hard copy.
+
+    engine.ema.momentum_at is shared with branch 2 and is deliberately not
+    touched; this wrapper keeps the change inside branch 1.
+    """
+    if step == 0 and cfg.schedule == "const":
+        return cfg.momentum
+    return momentum_at(step, cfg)
+
+
 def set_seed(seed: int) -> None:
-    """The four generators the reference seeds, plus the two cuDNN flags it also
-    sets (main.py:88-95). Without those a rerun varies at a fixed seed."""
+    """The four generators dassl's set_random_seed seeds -- which is all branch
+    1's reference does (train_mfa_v2.py:517, dassl/utils/tools.py:73) -- plus two
+    cuDNN flags it does NOT set.
+
+    Without those two flags cuDNN picks convolution algorithms by benchmarking,
+    so a rerun at a fixed seed still varies. That is a deliberate addition, not a
+    reproduction: it costs some throughput and buys reruns that actually match.
+    Branch 2's reference does set them; branch 1's does not.
+    """
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -178,7 +220,8 @@ def main(argv: list[str] | None = None) -> float:
         )
 
     trainable = sum(p.numel() for p in model.trainable_parameters())
-    n_evals = len({*range(eval_every, run_steps + 1, eval_every), run_steps})
+    n_evals = len({*range(eval_every, run_steps + 1, eval_every), run_steps,
+                   *([warmup_steps] if 0 < warmup_steps <= run_steps else [])})
     last = max(run_steps - 1, 0)
     checkpoint = (str(resolve_checkpoint(branch.backbone.checkpoint))
                   if Path(branch.backbone.checkpoint).is_file()
@@ -206,9 +249,9 @@ def main(argv: list[str] | None = None) -> float:
                           lr_at(last, branch.optim, total_steps,
                                 branch.warmup_steps)],
         "config_lr_unused": branch.optim.lr,
-        "ema_momentum_at_0_1_last": [momentum_at(0, branch.ema),
-                                     momentum_at(1, branch.ema),
-                                     momentum_at(last, branch.ema)],
+        "ema_momentum_at_0_1_last": [ema_momentum(0, branch.ema),
+                                     ema_momentum(1, branch.ema),
+                                     ema_momentum(last, branch.ema)],
         "output_dir": str(output_dir),
     }
     print("-" * 78)
@@ -265,7 +308,7 @@ def main(argv: list[str] | None = None) -> float:
                                            max_norm=branch.optim.grad_clip)
         optimizer.step()
         scheduler.step()
-        model.ema_update(momentum_at(step, branch.ema))
+        model.ema_update(ema_momentum(step, branch.ema))
 
         if in_warmup and step + 1 == warmup_steps:
             model.release_zero_shot()
@@ -279,12 +322,21 @@ def main(argv: list[str] | None = None) -> float:
                   f"mask {out.mask_ratio:.2f} ref {out.reference} "
                   f"lr {current_lr:.3e}")
 
-        if (step + 1) % eval_every == 0 or (step + 1) == run_steps:
+        # The warmup boundary gets its own evaluation regardless of the cadence.
+        # It is the one step where the branch changes what it learns from -- the
+        # frozen zero-shot reference is replaced by the EMA teacher -- so the
+        # accuracy on either side of it is the number that says whether warmup
+        # was long enough. The reference evaluates here too, and tags the line
+        # "end of s1 warmup" (train_mfa_v2.py:968, :974).
+        at_warmup_end = warmup_steps > 0 and (step + 1) == warmup_steps
+        if (step + 1) % eval_every == 0 or (step + 1) == run_steps or at_warmup_end:
             model.eval()
             teacher = evaluate(model.teacher_logits, test_loader, device)
             student = evaluate(model.logits, test_loader, device)
+            improved = teacher.accuracy > best
             best = max(best, teacher.accuracy)
-            print(f"[eval] step {step + 1}  teacher {teacher.accuracy:.2f}% "
+            tag = "  (end of warmup)" if at_warmup_end else ""
+            print(f"[eval] step {step + 1}{tag}  teacher {teacher.accuracy:.2f}% "
                   f"(loss {teacher.loss:.4f})  student {student.accuracy:.2f}% "
                   f"(loss {student.loss:.4f})  best teacher {best:.2f}%")
             with metrics_path.open("a") as handle:
@@ -299,14 +351,23 @@ def main(argv: list[str] | None = None) -> float:
                     "mmd": float(out.mmd.detach()),
                     "mask_ratio": out.mask_ratio,
                     "reference": out.reference,
+                    "at_warmup_end": at_warmup_end,
                     "teacher_updates": model.teacher_updates,
                     "lr": current_lr,
                 }) + "\n")
             # Only the LoRA factors: the frozen weights are reproducible from the
-            # checkpoint, and this is what the reference's save_lora stores.
-            torch.save(model.lora_state_dict(), output_dir / "model-last.pt")
-            if teacher.accuracy >= best:
-                torch.save(model.lora_state_dict(), output_dir / "model-best.pt")
+            # checkpoint, and this is what the reference's save_lora stores. The
+            # TEACHER's factors, because the teacher is what `best` follows and
+            # what evaluation scored -- saving the student would store a model
+            # whose accuracy was never measured.
+            #
+            # `improved` is strict, and computed BEFORE `best` is updated, which
+            # is the reference's guard. Comparing `teacher.accuracy >= best`
+            # after the update is equivalent except on a TIE, where it replaces
+            # the earlier of two equally good models with the later one.
+            torch.save(model.teacher_lora_state_dict(), output_dir / "model-last.pt")
+            if improved:
+                torch.save(model.teacher_lora_state_dict(), output_dir / "model-best.pt")
 
     print(f"done in {time.time() - started:.1f}s. best teacher accuracy {best:.2f}%")
     LAST_MODEL = model
