@@ -21,14 +21,23 @@ from cmct.backbones.clip.model import CLIP
 
 
 class ClipEncoder(nn.Module):
-    """`text` and `text_features` are plain tensor attributes, not buffers, so
-    they never appear in state_dict. Three consequences, all deliberate:
+    """`text` and `text_features` are NON-PERSISTENT buffers, so they move with
+    the module but never appear in state_dict. Three consequences, all
+    deliberate:
 
     - loading a checkpoint does not restore them; they are rebuilt from
       classnames
     - the EMA update walks state_dict, so it never touches them
     - changing classnames after construction works, but must be done on every
       copy of this module (see `retokenize`)
+
+    Non-persistent buffers rather than plain attributes because `nn.Module.to()`
+    moves only parameters and buffers: as plain attributes they stayed on the CPU
+    while the weights went to the GPU, and the first cosine-similarity matmul
+    raised a device mismatch. The codebase this comes from has the same
+    non-buffer design and solves it by pinning to CUDA at construction
+    (`clip.load(device="cuda")`, `tokenize(...).cuda()`,
+    `encode_text().detach().cuda()`), which also makes it unable to run on CPU.
 
     `text_features` is a snapshot computed once here, not recomputed per
     forward. That is valid only because the text tower is frozen: it is not in
@@ -41,8 +50,8 @@ class ClipEncoder(nn.Module):
         super().__init__()
         self.model = clip_model
         self.template = template
-        self.text: Tensor
-        self.text_features: Tensor
+        self.register_buffer("text", torch.empty(0, dtype=torch.int32), persistent=False)
+        self.register_buffer("text_features", torch.empty(0), persistent=False)
         self.retokenize(classnames)
 
     @property
@@ -64,6 +73,9 @@ class ClipEncoder(nn.Module):
         Must be called on each copy of this module separately: `text` and
         `text_features` are not in state_dict, so neither deepcopy-then-mutate
         nor an EMA update propagates a change made to one copy.
+
+        Assigning to a registered buffer keeps it a buffer, so the tensors stay
+        movable by `.to()` after every retokenize, not just the first.
         """
         device = next(self.model.parameters()).device
         self.text = tokenize([self.template.format(c) for c in classnames]).to(device)

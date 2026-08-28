@@ -157,7 +157,10 @@ class RunConfig:
     seed: int = 42
     device: str = "cuda:0"
     print_freq: int = 50
-    eval_freq: int = 200
+    eval_freq: int = 50
+    """In macro-steps. With steps_per_macro = 10 that is every 500 branch steps,
+    i.e. 20 evaluations over a 10000-step run -- the cadence of the training loop
+    this reproduces (20 epochs x 500 iterations)."""
 
 
 @dataclass

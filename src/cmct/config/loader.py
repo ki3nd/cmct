@@ -162,13 +162,22 @@ def load_resolved(path: str | Path) -> Config:
     return _assemble(dataset, raw)
 
 
+def format_config(cfg: Config) -> str:
+    """The resolved config as YAML -- byte-for-byte what `dump` writes.
+
+    One renderer for both, so what a run prints and what it leaves on disk can
+    never disagree.
+    """
+    return yaml.safe_dump(dataclasses.asdict(cfg), sort_keys=False, allow_unicode=True)
+
+
 def dump(cfg: Config, directory: str | Path, filename: str = "config.yaml") -> Path:
     """Write the resolved config into the run directory, so every run leaves
     behind exactly the config it ran with."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     out = directory / filename
-    out.write_text(yaml.safe_dump(dataclasses.asdict(cfg), sort_keys=False, allow_unicode=True))
+    out.write_text(format_config(cfg))
     return out
 
 

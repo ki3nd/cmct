@@ -159,10 +159,19 @@ def build_split(dataset: DatasetSpec, data: DataConfig) -> DomainSplit:
     if not split.train_u:
         raise DataError(f"{root}: no images found for target domains {data.target_domains}")
 
+    # Normalize unconditionally. The hardcoded Office-Home prompt list of the
+    # codebase this reproduces is exactly
+    #     "an image of a " + directory_name.replace("_", " ").lower()
+    # for all 65 classes in the same sorted order -- verified class by class, 0 of
+    # 65 differing. So this transform IS what produces the original's prompts, and
+    # gating it behind a flag meant the default produced "Alarm_Clock": a real
+    # underscore token, a different text embedding, on 9 of the 65 classes.
+    split.classnames = [c.replace("_", " ").lower() for c in split.classnames]
+
+    # The overrides are a DEVIATION from the original, not a neutral cleanup:
+    # they rename classes ("mouse" -> "computer mouse"). Off by default.
     if data.clarify_classnames:
         split.classnames = [
-            dataset.classname_overrides.get(c.replace("_", " ").lower(),
-                                            c.replace("_", " ").lower())
-            for c in split.classnames
+            dataset.classname_overrides.get(c, c) for c in split.classnames
         ]
     return split

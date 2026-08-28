@@ -9,12 +9,18 @@ from typing import Literal
 
 import torch
 
+from cmct.backbones.clip.download import resolve_checkpoint
 from cmct.backbones.clip.model import CLIP, build_model
 
 
 def load_state_dict(checkpoint: str) -> dict:
     """Read a CLIP checkpoint that may be either a TorchScript archive (what
-    OpenAI ships, e.g. ViT-B-16.pt) or a plain state_dict."""
+    OpenAI ships, e.g. ViT-B-16.pt) or a plain state_dict.
+
+    `checkpoint` may also be a model name ("ViT-B/16"), which is fetched into the
+    cache openai/CLIP uses and verified by SHA-256.
+    """
+    checkpoint = str(resolve_checkpoint(checkpoint))
     try:
         return torch.jit.load(checkpoint, map_location="cpu").eval().state_dict()
     except RuntimeError:
@@ -24,6 +30,8 @@ def load_state_dict(checkpoint: str) -> dict:
 
 def load_clip(checkpoint: str, dtype: Literal["fp16", "fp32"]) -> CLIP:
     """Instantiate CLIP from `checkpoint` at the requested precision.
+
+    `checkpoint` is a local path, or a model name to fetch and cache.
 
     "fp16" applies `convert_weights` (upstream behavior); "fp32" leaves every
     parameter in float32.

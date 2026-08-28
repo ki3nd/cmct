@@ -125,7 +125,7 @@ def test_crop_none_skips_the_crop_step():
 def test_class_folder_reader(class_folder_root):
     cfg = cfg_for(class_folder_root)
     split = build_split(cfg.dataset, cfg.data)
-    assert split.classnames == ["alarm_clock", "backpack", "mouse"]
+    assert split.classnames == ["alarm clock", "backpack", "mouse"]
     assert split.num_classes == 3
     assert len(split.train_x) == 3 * 4
     assert len(split.train_u) == 3 * 5
@@ -145,7 +145,7 @@ def test_image_list_reader(image_list_root):
     cfg = cfg_for(image_list_root, dataset_name="visda17")
     cfg.data = dataclasses.replace(cfg.data, source_domains=["art"], target_domains=["clipart"])
     split = build_split(cfg.dataset, cfg.data)
-    assert split.classnames == ["alarm_clock", "backpack", "mouse"]
+    assert split.classnames == ["alarm clock", "backpack", "mouse"]
     assert len(split.train_x) == 3 * 4
     assert len(split.train_u) == 3 * 5
     assert all(Path(d.path).is_file() for d in split.train_x)
@@ -163,6 +163,17 @@ def test_missing_domain_dir_raises(class_folder_root):
     cfg.data = dataclasses.replace(cfg.data, source_domains=["product"])
     with pytest.raises(DataError, match="domain directory .* not found"):
         build_split(cfg.dataset, cfg.data)
+
+
+def test_classnames_are_normalized_even_with_clarify_off(class_folder_root):
+    """Underscores become spaces and names are lowercased whether or not the
+    override flag is on. That transform is what reproduces the original's prompt
+    list; gating it behind the flag put a literal underscore token into 9 of
+    Office-Home's 65 prompts by default."""
+    cfg = cfg_for(class_folder_root, clarify_classnames=False)
+    split = build_split(cfg.dataset, cfg.data)
+    assert split.classnames == ["alarm clock", "backpack", "mouse"]
+    assert all("_" not in c and c == c.lower() for c in split.classnames)
 
 
 def test_clarify_classnames_applies_overrides(class_folder_root):

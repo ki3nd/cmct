@@ -1,0 +1,102 @@
+# Branch 2 alone on Office-Home art -> clipart, set up to reproduce VLP-UDA.
+#
+# Every value below matches VLP-UDA's own configs/office_home.yaml, not its
+# argparse defaults. Those two disagree in four places, and a real run passes the
+# yaml, so the yaml is what this reproduces:
+#
+#   lr                      3e-4  (argparse)  ->  3e-6   (yaml)
+#   multiple_lr_classifier  10                ->  1000
+#   label_smoothing         0.0               ->  0.1
+#   model_name              RN50              ->  VIT-B
+#
+# Total steps are 10000, from that codebase's 20 epochs x 500 iterations. Its
+# "epoch" is only an evaluation cadence: both training streams are infinite.
+#
+#   python -m cmct.train_vlp --config configs/experiment/vlp_officehome_a2c.yaml
+
+dataset: officehome
+
+data:
+  root: /home/pc1175/DA-Research/data_root
+  source_domains: [art]
+  target_domains: [clipart]
+  # The evaluation set is the target training images (transductive UDA), so this
+  # batch size affects speed only, never the number.
+  batch_size_test: 128
+  num_workers_test: 8
+  # Off, and it must stay off to reproduce: it renames 21 classes, which changes
+  # the text prompts. Class names are normalized (underscores to spaces,
+  # lowercased) regardless -- that normalization is what produces the original's
+  # prompt list.
+  clarify_classnames: false
+
+cotrain:
+  # 10000 x 1: one branch step per macro-step, so "step" means one thing here.
+  total_macro_steps: 10000
+  # Unused with a single branch -- there is no other teacher to read. Required by
+  # the schema so a co-training run cannot leave it unstated.
+  cross_ref_refresh: macro
+  ensemble: mean_prob
+
+branches:
+  - name: vlp
+    type: vlp_clip
+    backbone:
+      # fp32, because that codebase never runs this branch in fp16: its clone of
+      # CLIP has convert_weights commented out. An fp16 EMA teacher also stops
+      # updating after ~100 steps, so VlpModel rejects it.
+      # A model name is fetched into ~/.cache/clip (the directory openai/CLIP
+      # uses) and verified by SHA-256; a local path is read as given.
+      checkpoint: ViT-B/16
+      dtype: fp32
+    stream:
+      batch_size_x: 32
+      batch_size_u: 32
+      num_workers: 8
+      # Not implemented; setting it true raises.
+      strong_aug: false
+    optim:
+      lr: 0.000003
+      momentum: 0.9
+      weight_decay: 0.0005
+      nesterov: true
+      # lr(x) = lr * (1 + gamma * x) ** -decay, x counting scheduler steps.
+      # 3.000e-06 at step 0, 1.061e-06 at step 9999.
+      scheduler: inv
+      gamma: 0.0003
+      decay: 0.75
+      # The head trains at 1000x the encoder's rate: 3.000e-03 down to 1.061e-03.
+      param_group_multipliers:
+        classifier: 1000.0
+    ema:
+      # The teacher does not enter the loss and is not what `best` follows -- the
+      # original does not even update it (--teacher_ema defaults to false). It is
+      # reported alongside the student so its accuracy is visible, and it is what
+      # another branch would read later.
+      momentum: 0.99
+      schedule: ramp
+    # Unused by this branch: its self-loss has no confidence threshold. Kept at
+    # the schema default.
+    pseudo_label:
+      threshold: 0.85
+      self_reduce: mask
+      cross_reduce: mask
+    steps_per_macro: 1
+    # No cross-teaching in this run.
+    cross_weight: 0.0
+    cross_mode: mask
+    warmup_steps: 0
+    extra:
+      label_smoothing: 0.1
+      lambda1: 0.25
+      lambda2: 0.1
+      lambda3: 0.025
+
+run:
+  output_dir: outputs/vlp_officehome_a2c
+  seed: 42
+  device: cuda:0
+  # Both in macro-steps, which equal branch steps here. eval_freq 500 gives 20
+  # evaluations over 10000 steps -- the cadence of 20 epochs x 500 iterations.
+  print_freq: 100
+  eval_freq: 500

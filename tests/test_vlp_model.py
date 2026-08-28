@@ -281,3 +281,47 @@ def test_teacher_updates_counts_every_call(model):
     for expected in range(1, 4):
         model.ema_update(0.99)
         assert model.teacher_updates == expected
+
+
+# --- device placement --------------------------------------------------------
+
+def test_prompt_tensors_are_non_persistent_buffers(model):
+    """Buffers so `.to()` moves them; non-persistent so they stay out of
+    state_dict and therefore out of the EMA walk."""
+    encoder = model.encoder
+    assert "text" in encoder._buffers
+    assert "text_features" in encoder._buffers
+    keys = set(model.state_dict())
+    assert not [k for k in keys if k.endswith(".text") or k.endswith(".text_features")]
+    # CLIP's own text_projection is a parameter and must still be there
+    assert "encoder.model.text_projection" in keys
+
+
+def test_to_moves_the_prompt_tensors(model):
+    """The bug this guards: as plain attributes these stayed on the CPU while the
+    weights moved, and the first cosine matmul raised a device mismatch. The
+    `meta` device reproduces that class of bug without a GPU -- every CPU test
+    passed while it was broken."""
+    moved = model.to("meta")
+    assert next(moved.parameters()).device.type == "meta"
+    for encoder in (moved.encoder, moved.teacher_encoder):
+        assert encoder.text.device.type == "meta"
+        assert encoder.text_features.device.type == "meta"
+
+
+def test_float_does_not_cast_the_token_ids(model):
+    """`.float()` casts floating-point buffers; token ids must stay integral."""
+    floated = model.float()
+    assert floated.encoder.text.dtype is torch.int32
+    assert floated.encoder.text_features.dtype is torch.float32
+
+
+def test_retokenize_keeps_them_buffers(model):
+    """Assigning to a registered buffer keeps it one, so `.to()` still works
+    after a retokenize -- not only after construction."""
+    model.retokenize([f"other {c}" for c in CLASSNAMES])
+    assert "text_features" in model.encoder._buffers
+    keys = set(model.state_dict())
+    assert not [k for k in keys if k.endswith(".text") or k.endswith(".text_features")]
+    moved = model.to("meta")
+    assert moved.encoder.text_features.device.type == "meta"

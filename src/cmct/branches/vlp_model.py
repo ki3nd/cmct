@@ -18,7 +18,11 @@ from cmct.backbones.encoder import ClipEncoder
 from cmct.backbones.heads import ClassifierHead
 from cmct.engine.ema import ema_update
 
-TEMPLATE = "a photo of a {}"
+TEMPLATE = "an image of a {}"
+"""The template branch 2 comes from. Its hardcoded Office-Home prompt list is
+exactly `"an image of a " + directory_name.replace("_", " ").lower()` for all 65
+classes, in the same sorted order -- verified class by class against
+models/backbone.py, 0 of 65 differing."""
 
 
 def _freeze(module: nn.Module) -> nn.Module:
