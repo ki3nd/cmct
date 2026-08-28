@@ -89,7 +89,6 @@ branches:
       lambda1: 0.25
       lambda2: 0.1
       lambda3: 0.025
-      self_from_teacher: false
 
 run:
   output_dir: outputs/officehome_a2c
