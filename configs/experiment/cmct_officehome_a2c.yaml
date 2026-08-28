@@ -27,12 +27,19 @@ branches:
       num_workers: 8
       strong_aug: false
     optim:
+      # NOTE: with scheduler warmup_cosine and warmup_steps > 0, `lr` has NO
+      # effect on the learning rate -- the cosine's amplitude is warmup_lr. That
+      # is what the reference does: CosineAnnealingLR scales the group's current
+      # lr recursively rather than reading base_lrs, and the reference overwrites
+      # that lr with warmup_lr on every warmup step. `lr` is kept here because it
+      # is the value the reference passes to the optimizer constructor, and
+      # dropping it would hide that the two differ by 3.5x.
       lr: 0.0035
+      warmup_lr: 0.001
       momentum: 0.9
       weight_decay: 0.0005
       grad_clip: 20.0
-      scheduler: cosine
-      warmup_lr: 0.001
+      scheduler: warmup_cosine
     ema:
       # 0.99, the schema default. The codebase this comes from used 0.996
       # (train.py:202, --s1-ema-momentum) -- this is a deliberate deviation.

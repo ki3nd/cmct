@@ -88,7 +88,10 @@ class OptimConfig:
     weight_decay: float = 5e-4
     nesterov: bool = False
     grad_clip: float | None = None
-    scheduler: Literal["cosine", "inv", "none"] = "cosine"
+    scheduler: Literal["cosine", "inv", "warmup_cosine", "none"] = "cosine"
+    """"cosine": one cosine decay over total_steps. "inv": the formula below.
+    "warmup_cosine": flat `warmup_lr` for `warmup_steps` AND for the boundary
+    step itself, then a cosine decay over the remaining steps. "none": constant."""
     gamma: float = 3e-4
     """Only read when scheduler == "inv": lr * (1 + gamma * t) ** -decay."""
     decay: float = 0.75

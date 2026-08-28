@@ -54,7 +54,7 @@ def test_per_branch_backbone_and_dtype():
 def test_per_branch_defaults_are_independent():
     cfg = load_experiment(EXPERIMENT)
     lora, vlp = cfg.branches
-    assert lora.optim.scheduler == "cosine"
+    assert lora.optim.scheduler == "warmup_cosine"
     assert vlp.optim.scheduler == "inv"
     assert lora.ema.schedule == "const"
     assert vlp.ema.schedule == "ramp"
