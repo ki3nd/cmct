@@ -57,7 +57,7 @@ def test_per_branch_defaults_are_independent():
     assert lora.optim.scheduler == "cosine"
     assert vlp.optim.scheduler == "inv"
     assert lora.ema.schedule == "const"
-    assert vlp.ema.schedule == "dacs"
+    assert vlp.ema.schedule == "ramp"
     assert vlp.optim.param_group_multipliers == {"classifier": 1000.0}
 
 

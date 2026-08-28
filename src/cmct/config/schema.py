@@ -102,7 +102,7 @@ class OptimConfig:
 @dataclass
 class EmaConfig:
     momentum: float = 0.99
-    schedule: Literal["const", "dacs", "hard_copy_then_jump"] = "dacs"
+    schedule: Literal["ramp", "const", "hard_copy_then_jump"] = "ramp"
     warmup_iters: int = 100
     """Only read when schedule == "hard_copy_then_jump"."""
 

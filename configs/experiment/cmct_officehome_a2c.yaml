@@ -75,7 +75,7 @@ branches:
         classifier: 1000.0
     ema:
       momentum: 0.99
-      schedule: dacs
+      schedule: ramp
     pseudo_label:
       threshold: 0.85
       self_reduce: mask

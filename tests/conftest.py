@@ -53,3 +53,49 @@ def image_list_root(tmp_path) -> Path:
                 lines.append(f"{domain}/{name} {label}")
         (root / f"{domain}.txt").write_text("\n".join(lines) + "\n")
     return root
+
+
+CHECKPOINT = Path("/home/pc1175/DA-Research/old-cmct/assets/ViT-B-16.pt")
+
+
+@pytest.fixture(scope="session")
+def clip_fp32():
+    """One real CLIP ViT-B/16, loaded once per session.
+
+    Only for assertions that need the real architecture. Everything else uses
+    `tiny_clip`, because deep-copying 150M parameters per test is minutes, not
+    seconds.
+    """
+    from cmct.backbones.clip import load_clip
+
+    if not CHECKPOINT.is_file():
+        pytest.skip(f"no CLIP checkpoint at {CHECKPOINT}")
+    return load_clip(str(CHECKPOINT), "fp32")
+
+
+def build_tiny_clip():
+    """A real `CLIP` module at toy dimensions.
+
+    Same class and same code paths as the full model, but ~1.7M parameters, so a
+    test can build and deep-copy one per function. vocab_size stays 49408 because
+    the tokenizer emits ids in that range; context_length stays 77.
+    """
+    from cmct.backbones.clip.model import CLIP
+
+    return CLIP(
+        embed_dim=32,
+        image_resolution=32,
+        vision_layers=1,
+        vision_width=64,
+        vision_patch_size=16,
+        context_length=77,
+        vocab_size=49408,
+        transformer_width=32,
+        transformer_heads=2,
+        transformer_layers=1,
+    ).float().eval()
+
+
+@pytest.fixture
+def tiny_clip():
+    return build_tiny_clip()
