@@ -83,6 +83,9 @@ def test_delta_and_residual_match_the_reference(rank):
                      * (ref_proj.w_lora_B.detach().float()
                         @ ref_proj.w_lora_A.detach().float()))
         our_delta = our_proj.delta().detach().float()
+        # atol=1e-4: the weight-level agreement float16 permits between two
+        # independent SVD-and-cast pipelines (measured 2.99e-05 in this run,
+        # well inside it).
         assert torch.allclose(ref_delta, our_delta, atol=1e-4), (
             name, float((ref_delta - our_delta).abs().max())
         )
@@ -139,10 +142,6 @@ def test_scaling_formula_matches_the_reference():
 
 def test_forward_matches_the_reference_in_eval_mode():
     """Both sides in eval so LoRA dropout is off and the comparison is
-    deterministic."""
-    Reference = import_reference_layer()
-    ref_mha, our_mha = paired_attention(dim=512, heads=8)
-    """Both sides in eval so LoRA dropout is off and the comparison is
     deterministic.
 
     Bounded by float16's relative epsilon rather than by the weight-level
@@ -174,16 +173,21 @@ def test_forward_matches_the_reference_in_eval_mode():
 
 def test_forward_matches_the_unwrapped_attention_in_float32():
     """float32 counterpart to the float16 forward test above, where rounding
-    noise cannot hide a real divergence.
+    noise cannot hide a mistake in the forward-path composition.
 
     The reference's `PlainMultiheadAttentionLoRA.__init__` hardcodes `.half()`
     on its q/k/v/out projections (old-cmct/loralib/layers.py:505-508), so it
     cannot be constructed in float32 -- there is no reference to compare
-    against here. Instead this checks the property directly on our own
-    implementation: the SVD split reconstructs the wrapped weight exactly in
-    float32 (`frozen + scaling * B @ A == W_orig`, up to float32 rounding), so
-    our wrapper's output must match the *unwrapped* nn.MultiheadAttention's
-    output just as tightly.
+    against here. Instead this checks our wrapper's output against the
+    *unwrapped* nn.MultiheadAttention's output at float32 precision.
+
+    This exercises the forward-path composition -- the q/k/v/out split, the
+    head reshape, masking, the attention itself -- and would catch a mistake
+    there. It does NOT constrain the SVD split: `frozen + delta == original`
+    holds by construction (`weight := original - scaling * B @ A`) for ANY
+    factor pair, including a zero delta, so agreement here is not evidence the
+    SVD is right. `test_delta_and_residual_match_the_reference` is the test
+    that carries that job, against the real external reference.
     """
     torch.manual_seed(0)
     mha = nn.MultiheadAttention(512, 8)
@@ -191,7 +195,16 @@ def test_forward_matches_the_unwrapped_attention_in_float32():
     same_mha = nn.MultiheadAttention(512, 8)
     assert torch.equal(mha.in_proj_weight, same_mha.in_proj_weight)
 
-    ours = MultiheadAttentionLoRA(same_mha, rank=8, alpha=1.0, dropout=0.0,
+    rank = 8
+    dim = same_mha.embed_dim
+    weight = same_mha.in_proj_weight.detach()
+    original_weights = {
+        "q": weight[:dim].clone(),
+        "k": weight[dim:2 * dim].clone(),
+        "v": weight[2 * dim:].clone(),
+    }
+
+    ours = MultiheadAttentionLoRA(same_mha, rank=rank, alpha=1.0, dropout=0.0,
                                   params=("q", "k", "v"),
                                   param_dtype=torch.float32).eval()
     mha.eval()
@@ -202,3 +215,13 @@ def test_forward_matches_the_unwrapped_attention_in_float32():
         got, _ = ours(x, x, x)
     error = (got - expected).norm() / expected.norm()
     assert float(error) < 1e-6, float(error)
+
+    # Constrains the SVD split itself, which the forward comparison above cannot:
+    # the reconstruction frozen + delta == original holds for ANY factor pair, so
+    # a zero delta would satisfy it. The singular values of the delta do not --
+    # they must be the r largest of the original weight.
+    for name in ("q", "k", "v"):
+        proj = getattr(ours, f"{name}_proj")
+        delta_sv = torch.linalg.svdvals(proj.delta().detach())[:rank]
+        original_sv = torch.linalg.svdvals(original_weights[name])[:rank]
+        assert torch.allclose(delta_sv, original_sv, rtol=1e-5), name
