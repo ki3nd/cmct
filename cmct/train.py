@@ -371,11 +371,18 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         memory("branch 1 before forwards", debug)
         source_logits, source_features1 = lora["model"](batch1.img_x)
         memory("branch 1 after forward 1 (source)", debug)
-        target_features1 = (lora["model"].features(batch1.img_u)
-                            if lora["extra"]["mmd_weight"] > 0 else None)
-        memory("branch 1 after forward 2 (mmd)", debug)
-        target_logits1 = lora["model"].logits(batch1.student_img_u)
-        memory("branch 1 after forward 3 (target)", debug)
+        # ONE target forward, feeding both the MMD features and the student's
+        # own logits. The reference does the same
+        # (phpl/train_mfa_v2.py:520-521, `logits1_u, feat_u1 = student1(image_u1)`
+        # then `MK_MMD(feat_x1, feat_u1)`), and it is not just an optimization:
+        # with dropout on both towers, two separate calls would draw two
+        # different masks, so MMD and the pseudo-label loss would pull on two
+        # different realizations of the same image instead of one. It also holds
+        # two graphs open here instead of three -- about 3.1 GiB at ViT-B/16 and
+        # batch 32, which is the difference between fitting on a 16 GiB card and
+        # not.
+        target_logits1, target_features1 = lora["model"](batch1.student_img_u)
+        memory("branch 1 after target forward", debug)
         out1 = lora["loss"](
             source_logits=source_logits, source_label=batch1.label_x,
             target_logits=target_logits1, reference_probabilities=reference,
