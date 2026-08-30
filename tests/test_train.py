@@ -487,3 +487,44 @@ def test_branch_ones_scheduler_is_wired_with_its_warmup(tiny_run):
         f"lr after the run is {actual}; warmup-aware wiring gives {with_warmup}, "
         f"the slip gives {without_warmup}"
     )
+
+
+def test_the_two_branches_treat_their_warmups_differently_for_the_LR():
+    """Branch 1 holds a SEPARATE flat learning rate through its warmup; branch 2
+    has no warmup learning rate at all and runs one continuous rule across its
+    boundary. The reference gates only branch 1's scheduler
+    (train_mfa_v2.py:940 `if not in_warmup1: sched1.step()`, against an ungated
+    :867 for branch 2), and this is the consequence.
+
+    Worth pinning because the two look like the same knob: both branches have
+    `warmup_steps`, but it means "a different LR" on one and "when cross-teaching
+    starts" on both.
+    """
+    from cmct.config import load_experiment
+    from cmct.engine import lr_at
+
+    cfg = load_experiment(EXPERIMENT)
+    lora = next(b for b in cfg.branches if b.type == "lora_clip")
+    vlp = next(b for b in cfg.branches if b.type == "vlp_clip")
+    lora_total = cfg.cotrain.total_macro_steps * lora.steps_per_macro
+    vlp_total = cfg.cotrain.total_macro_steps * vlp.steps_per_macro
+
+    # Branch 1: flat at warmup_lr through the warmup AND its boundary step, then
+    # decaying. `lr` never appears.
+    flat = [lr_at(s, lora.optim, lora_total, lora.warmup_steps)
+            for s in (0, lora.warmup_steps // 2, lora.warmup_steps)]
+    assert flat == [pytest.approx(lora.optim.warmup_lr)] * 3, flat
+    assert lora.optim.warmup_lr != lora.optim.lr
+    after = lr_at(lora.warmup_steps + 1, lora.optim, lora_total, lora.warmup_steps)
+    assert after < lora.optim.warmup_lr
+
+    # Branch 2: no warmup LR, and no discontinuity at the boundary. The step
+    # either side of it differs by the same amount as any other neighbouring
+    # pair, so the boundary is invisible to the schedule.
+    assert vlp.optim.warmup_lr is None
+    around = [lr_at(s, vlp.optim, vlp_total)
+              for s in (vlp.warmup_steps - 1, vlp.warmup_steps, vlp.warmup_steps + 1)]
+    at_boundary = around[0] - around[1]
+    after_boundary = around[1] - around[2]
+    assert at_boundary == pytest.approx(after_boundary, rel=1e-2), around
+    assert around[0] > around[1] > around[2], "branch 2's LR should decay throughout"
