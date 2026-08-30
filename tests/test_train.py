@@ -143,11 +143,6 @@ def test_how_stale_branch_ones_cross_reference_is(tiny_run, monkeypatch, refresh
     edit(config_path, cross_ref_refresh=refresh, total_macro_steps=5)
     steps_per_macro = yaml.safe_load(config_path.read_text())["branches"][1]["steps_per_macro"]
 
-    real_ema = VlpModel.ema_update
-
-    def counting_ema(self, momentum):
-        real_ema(self, momentum)
-
     def versioned_logits(self, images):
         # class 0 gets a logit equal to the update count, so softmax's argmax and
         # magnitude both identify the version
@@ -155,7 +150,6 @@ def test_how_stale_branch_ones_cross_reference_is(tiny_run, monkeypatch, refresh
         out[:, 0] = float(self.teacher_updates)
         return out
 
-    monkeypatch.setattr(VlpModel, "ema_update", counting_ema)
     monkeypatch.setattr(VlpModel, "teacher_logits", versioned_logits)
 
     seen = []
@@ -193,7 +187,7 @@ def test_every_reported_model_gets_its_own_best(tiny_run, monkeypatch):
     edit(config_path, ensemble="off", total_macro_steps=6)
     from cmct.engine.evaluator import EvalResult
 
-    scores = iter([(10.0, 90.0), (50.0, 40.0)])
+    scores = iter([(10.0, 90.0), (30.0, 70.0), (50.0, 40.0)])
 
     def fake(logits_fns, loader, device, mode):
         a, b = next(scores)
@@ -252,3 +246,127 @@ def test_the_shipped_config_loads_and_builds_both_branches(tiny_run):
     train.main(["--config", str(config_path), "--max-macro-steps", "1"])
     assert train.LAST_STATE["lora"]["model"] is not None
     assert train.LAST_STATE["vlp"]["model"] is not None
+
+
+# --- branch 2 must step exactly as its solo script does ----------------------
+
+def test_branch_twos_head_sees_source_before_target(tiny_run, monkeypatch):
+    """The head starts with a BatchNorm1d whose running stats are updated on
+    every forward in train mode, so the ORDER of the two head calls decides which
+    domain those buffers lean toward. They are EMA-copied into teacher_head,
+    which evaluation scores AND which supplies branch 1's cross pseudo-labels.
+
+    Reusing the target logits for the cross term made it tempting to compute them
+    first; that reversed the order and moved running_mean about 5% toward the
+    target domain over a run. Nothing else in the suite would have noticed -- no
+    loss, gradient or accuracy assertion changes.
+    """
+    from cmct.backbones.heads import ClassifierHead
+    from cmct.branches.vlp_model import VlpModel
+
+    config_path, _ = tiny_run
+    # The source and target batches have different sizes, so which one reached
+    # the head is readable from the tensor itself -- no bookkeeping to get wrong.
+    raw = yaml.safe_load(config_path.read_text())
+    raw["branches"][1]["stream"]["batch_size_x"] = 4
+    raw["branches"][1]["stream"]["batch_size_u"] = 6
+    config_path.write_text(yaml.safe_dump(raw))
+
+    seen: list[str] = []
+    real_head = ClassifierHead.forward
+    real_features = VlpModel.features
+
+    def spy_features(self, images):
+        return real_features(self, images)
+
+    def spy_head(self, features):
+        seen.append({4: "source", 6: "target"}.get(features.shape[0], "other"))
+        return real_head(self, features)
+
+    monkeypatch.setattr(VlpModel, "features", spy_features)
+    monkeypatch.setattr(ClassifierHead, "forward", spy_head)
+    train.main(["--config", str(config_path), "--max-macro-steps", "1"])
+
+    training_calls = [tag for tag in seen if tag in ("source", "target")]
+    assert training_calls[:2] == ["source", "target"], training_calls[:6]
+
+
+# --- the shipped config, not the fixture's overrides -------------------------
+
+def test_the_shipped_config_pins_the_references_values():
+    """The tiny_run fixture overwrites thresholds, warmups and steps_per_macro
+    before the script ever reads them, so every test above runs on values that
+    are not the shipped ones. This reads the file itself."""
+    from cmct.config import load_experiment
+
+    cfg = load_experiment(EXPERIMENT)
+    lora = next(b for b in cfg.branches if b.type == "lora_clip")
+    vlp = next(b for b in cfg.branches if b.type == "vlp_clip")
+
+    assert cfg.cotrain.total_macro_steps == 1000
+    assert cfg.cotrain.cross_ref_refresh == "macro"
+    assert cfg.cotrain.ensemble == "off"
+
+    assert (lora.steps_per_macro, lora.warmup_steps) == (1, 50)
+    assert (vlp.steps_per_macro, vlp.warmup_steps) == (10, 500)
+    for branch in (lora, vlp):
+        assert branch.cross_weight == 0.5
+        assert branch.cross_mode == "mask"
+        assert branch.pseudo_label.threshold == 0.85
+    assert lora.ema.momentum == 0.99 and lora.ema.schedule == "const"
+    assert vlp.ema.schedule == "ramp"
+    assert lora.optim.warmup_lr == 0.001 and lora.optim.grad_clip == 20.0
+
+
+def test_the_branch_blocks_match_the_single_branch_configs():
+    """A co-training run and a solo run must differ only by the cross term, so
+    every value outside the co-training knobs has to be the same file's."""
+    import yaml
+
+    cotrain = yaml.safe_load(EXPERIMENT.read_text())["branches"]
+    solo = {}
+    for name in ("lora_officehome_a2c", "vlp_officehome_a2c"):
+        path = CONFIGS / "experiment" / f"{name}.yaml"
+        for branch in yaml.safe_load(path.read_text())["branches"]:
+            solo[branch["type"]] = branch
+
+    cotrain_only = {"steps_per_macro", "warmup_steps", "cross_weight", "cross_mode"}
+    for branch in cotrain:
+        reference = solo[branch["type"]]
+        for key, value in branch.items():
+            if key in cotrain_only:
+                continue
+            assert value == reference[key], f"{branch['name']}.{key}"
+
+
+# --- boundary evaluation and best checkpoints --------------------------------
+
+def test_each_branchs_warmup_boundary_is_evaluated(tiny_run):
+    """Branch 1's warmup ends at macro 2 and branch 2's inside macro 2 as well;
+    eval_freq is 3, so neither would be evaluated on the cadence."""
+    config_path, output_dir = tiny_run
+    train.main(["--config", str(config_path)])
+    tagged = {r["macro"]: r["at_warmup_end"] for r in rows(output_dir)
+              if r.get("at_warmup_end")}
+    assert 2 in tagged, tagged
+    assert any("lora" in tag for tag in tagged[2])
+    assert any("vlp" in tag for tag in tagged[2])
+    assert 2 % 3 != 0, "eval_freq would have covered it anyway"
+
+
+def test_a_best_checkpoint_is_written_per_model(tiny_run, monkeypatch):
+    config_path, output_dir = tiny_run
+    from cmct.engine.evaluator import EvalResult
+
+    scores = iter([(10.0, 90.0), (30.0, 70.0), (50.0, 40.0)])
+
+    def fake(logits_fns, loader, device, mode):
+        a, b = next(scores)
+        return {"lora": EvalResult(a, 0.0, 0, 1), "vlp": EvalResult(b, 0.0, 0, 1)}
+
+    monkeypatch.setattr(train, "evaluate_ensemble", fake)
+    train.main(["--config", str(config_path)])
+
+    assert (output_dir / "model-best-lora.pt").is_file()
+    assert (output_dir / "model-best-vlp.pt").is_file()
+    assert (output_dir / "model-last.pt").is_file()

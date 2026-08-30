@@ -272,9 +272,20 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             vlp["optimizer"].zero_grad()
             source_features = vlp["model"].features(batch2.img_x)
             target_features = vlp["model"].features(batch2.img_u)
+            # SOURCE first, then target. The head starts with a BatchNorm1d, and
+            # in train mode every forward updates its running stats, so the order
+            # of these two calls decides which domain those buffers lean toward.
+            # The reference's TransferNet.forward calls the head on source then
+            # target (make_model.py:52-71, train_mfa_v2.py:797), and train_vlp.py
+            # does the same. Hoisting the target call above the loss -- to reuse
+            # its logits for the cross term -- silently reversed that here, and
+            # moved running_mean about 5% toward the target domain over a run.
+            # Those buffers are EMA-copied into teacher_head, which is both what
+            # evaluation scores and what supplies branch 1's cross pseudo-labels.
+            source_logits2 = vlp["model"].head(source_features)
             target_logits2 = vlp["model"].head(target_features)
             out2 = vlp["loss"](
-                source_logits=vlp["model"].head(source_features),
+                source_logits=source_logits2,
                 source_label=batch2.label_x,
                 source_cosine_logits=vlp["model"].encoder.cosine_logits(source_features),
                 target_logits=target_logits2,
@@ -359,11 +370,18 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         row = {
             "macro": macro + 1,
             f"{lora['name']}_loss": float(loss1.detach()),
+            f"{lora['name']}_source_ce": float(out1.source_ce.detach()),
+            f"{lora['name']}_mmd": float(out1.mmd.detach()),
             f"{lora['name']}_self": float(out1.pseudo_label.detach()),
             f"{lora['name']}_cross": cross1_value,
             f"{lora['name']}_cross_mask": cross1_mask,
             f"{lora['name']}_reference": reference_name,
             f"{vlp['name']}_loss": float(loss2.detach()),
+            f"{vlp['name']}_clf": float(out2.clf.detach()),
+            f"{vlp['name']}_task": float(out2.task.detach()),
+            f"{vlp['name']}_distill": float(out2.distill.detach()),
+            f"{vlp['name']}_reg": float(out2.reg.detach()),
+            f"{vlp['name']}_ramp": out2.ramp,
             f"{vlp['name']}_cross": cross2_value,
             f"{vlp['name']}_cross_mask": cross2_mask,
         }
@@ -373,15 +391,33 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             total2 = row[f"{name2}_loss"]
             lr1 = lr_at(macro, lora_cfg.optim, lora["total_steps"],
                         lora_cfg.warmup_steps)
+            src1, mmd1 = row[f"{name1}_source_ce"], row[f"{name1}_mmd"]
+            clf2 = row[f"{name2}_clf"]
             print(f"macro {macro + 1}/{run_macro}  "
-                  f"{name1} {total1:.4f} (self {self1:.4f} "
+                  f"{name1} {total1:.4f} (src {src1:.4f} mmd {mmd1:.4f} "
+                  f"self {self1:.4f} "
                   f"cross {cross1_value:.4f} mask {cross1_mask:.2f} "
                   f"ref {reference_name})  "
-                  f"{name2} {total2:.4f} "
-                  f"(cross {cross2_value:.4f} mask {cross2_mask:.2f})  "
+                  f"{name2} {total2:.4f} (clf {clf2:.4f} "
+                  f"cross {cross2_value:.4f} mask {cross2_mask:.2f})  "
                   f"lr {lr1:.3e}")
 
-        if (macro + 1) % cfg.run.eval_freq == 0 or (macro + 1) == run_macro:
+        # Each branch's warmup boundary earns an evaluation of its own, off the
+        # cadence: it is the step where that branch starts learning from the
+        # other one, so the accuracy on either side of it is what says whether
+        # its warmup was long enough. The reference evaluates at both
+        # (train_mfa_v2.py:962-970), and train_lora.py already does this for its
+        # own branch -- omitting it here made the two scripts disagree.
+        #
+        # Branch 2's boundary is found the way the reference finds it: step2 has
+        # already been advanced past this macro-step's micro-steps, so ">=" with
+        # a look-back catches the macro-step its warmup ended inside, which "=="
+        # would miss whenever steps_per_macro > 1.
+        at_warmup1_end = (macro + 1) == lora_cfg.warmup_steps
+        at_warmup2_end = (step2 >= vlp_cfg.warmup_steps
+                          and step2 - vlp_cfg.steps_per_macro < vlp_cfg.warmup_steps)
+        boundary = at_warmup1_end or at_warmup2_end
+        if (macro + 1) % cfg.run.eval_freq == 0 or (macro + 1) == run_macro or boundary:
             for entry in (lora, vlp):
                 entry["model"].eval()
             scores = evaluate_ensemble(
@@ -389,17 +425,31 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                  vlp["name"]: vlp["teacher_logits"]},
                 test_loader, device, ensemble_mode,
             )
+            improved = [key for key, result in scores.items()
+                        if result.accuracy > best[key]]
             for key, result in scores.items():
                 best[key] = max(best[key], result.accuracy)
                 row[f"{key}_acc"] = result.accuracy
                 row[f"{key}_loss_eval"] = result.loss
                 row[f"best_{key}"] = best[key]
-            print("[eval] macro " + str(macro + 1) + "  " + "  ".join(
-                f"{key} {scores[key].accuracy:.2f}% (best {best[key]:.2f}%)"
-                for key in reported))
-            torch.save({"lora": lora["model"].teacher_lora_state_dict(),
-                        "vlp": vlp["model"].state_dict()},
-                       output_dir / "model-last.pt")
+            tags = ([f"end of {lora['name']} warmup"] if at_warmup1_end else []) + \
+                   ([f"end of {vlp['name']} warmup"] if at_warmup2_end else [])
+            row["at_warmup_end"] = tags
+            print("[eval] macro " + str(macro + 1)
+                  + ("  (" + ", ".join(tags) + ")" if tags else "") + "  "
+                  + "  ".join(f"{key} {scores[key].accuracy:.2f}% "
+                              f"(best {best[key]:.2f}%)" for key in reported))
+
+            # The teacher's factors for branch 1 and the whole of branch 2 --
+            # what evaluation just scored. Saved per branch on ITS OWN
+            # improvement, because the two bests move independently: one file
+            # keyed to a single branch would leave the other's best model
+            # unrecoverable, and that is the asymmetry this run exists to find.
+            snapshot = {"lora": lora["model"].teacher_lora_state_dict(),
+                        "vlp": vlp["model"].state_dict()}
+            torch.save(snapshot, output_dir / "model-last.pt")
+            for key in improved:
+                torch.save(snapshot, output_dir / f"model-best-{key}.pt")
 
         with metrics_path.open("a") as handle:
             handle.write(json.dumps(row) + "\n")
