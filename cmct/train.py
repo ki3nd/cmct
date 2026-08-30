@@ -106,7 +106,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                              "schedule, so the first N steps of a short run match "
                              "the first N of the real one")
     parser.add_argument("--device", default=None, help="overrides run.device")
+    parser.add_argument("--debug-memory", action="store_true",
+                        help="print CUDA memory at each stage of the first "
+                             "macro-step, then stop. Answers where the memory "
+                             "goes: weights, branch 2's step, or branch 1's")
     return parser.parse_args(argv)
+
+
+def memory(label: str, enabled: bool) -> None:
+    if not enabled or not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize()
+    gib = 2 ** 30
+    print(f"  [mem] {label:<38} now {torch.cuda.memory_allocated() / gib:6.2f} GiB"
+          f"   peak {torch.cuda.max_memory_allocated() / gib:6.2f} GiB", flush=True)
 
 
 def build_lora(cfg: Config, branch: BranchConfig, split, device: str) -> dict:
@@ -207,9 +220,13 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     print("=" * 78)
     print(format_config(cfg), end="")
 
+    debug = args.debug_memory
+    memory("start", debug)
     split = build_split(cfg.dataset, cfg.data)
     lora = build_lora(cfg, lora_cfg, split, device)
+    memory("branch 1 built", debug)
     vlp = build_vlp(cfg, vlp_cfg, split, device)
+    memory("branch 2 built", debug)
     streams = {b["name"]: BatchSource(split, cfg.dataset, b["config"], cfg.run.seed)
                for b in (lora, vlp)}
     test_loader = build_test_loader(split, cfg.dataset, cfg.data)
@@ -327,10 +344,12 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                      for p in g["params"] if p.requires_grad],
                     max_norm=vlp_cfg.optim.grad_clip,
                 )
+            memory("branch 2 before backward", debug and step2 == 0)
             vlp["optimizer"].step()
             vlp["model"].ema_update(momentum_at(step2, vlp_cfg.ema))
             vlp["scheduler"].step()
             step2 += 1
+            memory("branch 2 after step", debug and step2 == 1)
 
         # "micro": recompute after branch 2 has moved, so branch 1 reads a
         # current teacher. A deviation -- the reference cannot do this, its
@@ -341,10 +360,14 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
 
         reference, reference_name = lora_reference(lora, batch1.img_u, in_warmup1)
         lora["optimizer"].zero_grad()
+        memory("branch 1 before forwards", debug)
         source_logits, source_features1 = lora["model"](batch1.img_x)
+        memory("branch 1 after forward 1 (source)", debug)
         target_features1 = (lora["model"].features(batch1.img_u)
                             if lora["extra"]["mmd_weight"] > 0 else None)
+        memory("branch 1 after forward 2 (mmd)", debug)
         target_logits1 = lora["model"].logits(batch1.student_img_u)
+        memory("branch 1 after forward 3 (target)", debug)
         out1 = lora["loss"](
             source_logits=source_logits, source_label=batch1.label_x,
             target_logits=target_logits1, reference_probabilities=reference,
@@ -363,7 +386,9 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             cross1_value = float(cross1.value.detach())
             cross1_mask = cross1.mask_ratio
 
+        memory("branch 1 before backward", debug)
         loss1.backward()
+        memory("branch 1 after backward", debug)
         if lora_cfg.optim.grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(
                 list(lora["model"].trainable_parameters()),
@@ -373,6 +398,10 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         lora["model"].ema_update(ema_momentum(macro, lora_cfg.ema))
         if lora["uses_zero_shot"] and in_warmup1 and macro + 1 == lora_cfg.warmup_steps:
             lora["model"].release_zero_shot()
+
+        if debug:
+            print("  [mem] stopping after one macro-step (--debug-memory)")
+            return best
 
         row = {
             "macro": macro + 1,
