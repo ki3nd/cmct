@@ -61,7 +61,8 @@ class CmkdLoss:
 
     def __call__(self, *, source_logits: Tensor, source_label: Tensor,
                  source_cosine_logits: Tensor, target_logits: Tensor,
-                 target_cosine_logits: Tensor, step: int) -> CmkdOutput:
+                 target_cosine_logits: Tensor, step: int,
+                 self_reference_logits: Tensor | None = None) -> CmkdOutput:
         """Keyword-only on purpose: these are same-shaped tensors, so swapping
         two of them positionally would be a silent error rather than a type
         error."""
@@ -71,9 +72,22 @@ class CmkdLoss:
                               label_smoothing=self.label_smoothing)
 
         target_pred = F.softmax(target_logits, dim=1)
+        # The STUDENT's live cosine branch. `reg` uses this one and only this
+        # one, so it keeps a gradient into the visual encoder.
         cosine_pred = F.softmax(target_cosine_logits, dim=-1)
-        coe = calibrated_coefficient(target_pred, cosine_pred)
-        mixed = 0.5 * (target_pred + cosine_pred.detach())
+
+        # The self-reference for `coe` and `mix` alone. `self_reference_logits`
+        # is the teacher's cosine branch when the caller supplies it
+        # (--s2-self-from-teacher); the reference swaps ONLY these two, never
+        # `reg` (vlpuda_pure/models/cmkd.py:42-45 against :54). Passing the
+        # teacher for all three looks harmless and is not: the teacher runs
+        # under no_grad, so `reg` would contribute exactly zero gradient and the
+        # target domain would stop reaching branch 2's encoder through the
+        # cosine branch at all -- while the logged number stayed plausible.
+        reference_pred = (cosine_pred if self_reference_logits is None
+                          else F.softmax(self_reference_logits, dim=-1))
+        coe = calibrated_coefficient(target_pred, reference_pred)
+        mixed = 0.5 * (target_pred + reference_pred.detach())
 
         weight = self.lambda1 * ramp
         task = weight * gini_impurity(target_pred, coe)
