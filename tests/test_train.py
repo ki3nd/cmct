@@ -262,33 +262,32 @@ def test_branch_twos_head_sees_source_before_target(tiny_run, monkeypatch):
     loss, gradient or accuracy assertion changes.
     """
     from cmct.backbones.heads import ClassifierHead
-    from cmct.branches.vlp_model import VlpModel
 
     config_path, _ = tiny_run
     # The source and target batches have different sizes, so which one reached
     # the head is readable from the tensor itself -- no bookkeeping to get wrong.
     raw = yaml.safe_load(config_path.read_text())
-    raw["branches"][1]["stream"]["batch_size_x"] = 4
+    # Sizes chosen to be unique: batch_size_test is 4, so reusing 4 here would
+    # tag the teacher head's eval-time calls "source" as well.
+    raw["branches"][1]["stream"]["batch_size_x"] = 5
     raw["branches"][1]["stream"]["batch_size_u"] = 6
+    raw["branches"][1]["steps_per_macro"] = 2
     config_path.write_text(yaml.safe_dump(raw))
 
     seen: list[str] = []
     real_head = ClassifierHead.forward
-    real_features = VlpModel.features
-
-    def spy_features(self, images):
-        return real_features(self, images)
 
     def spy_head(self, features):
-        seen.append({4: "source", 6: "target"}.get(features.shape[0], "other"))
+        seen.append({5: "source", 6: "target"}.get(features.shape[0], "other"))
         return real_head(self, features)
 
-    monkeypatch.setattr(VlpModel, "features", spy_features)
     monkeypatch.setattr(ClassifierHead, "forward", spy_head)
     train.main(["--config", str(config_path), "--max-macro-steps", "1"])
 
     training_calls = [tag for tag in seen if tag in ("source", "target")]
-    assert training_calls[:2] == ["source", "target"], training_calls[:6]
+    # The WHOLE prefix, both micro-steps -- checking only the first two calls
+    # would miss an order that is right once and wrong afterwards.
+    assert training_calls == ["source", "target"] * 2, training_calls
 
 
 # --- the shipped config, not the fixture's overrides -------------------------
@@ -317,6 +316,13 @@ def test_the_shipped_config_pins_the_references_values():
     assert vlp.ema.schedule == "ramp"
     assert lora.optim.warmup_lr == 0.001 and lora.optim.grad_clip == 20.0
 
+    # Not reachable from the branch-block equality test -- these live outside a
+    # branch, and the solo configs deliberately differ (50/10 and 500/100), so
+    # that test would not catch a regression here. eval_freq decides where `best`
+    # is sampled.
+    assert cfg.run.eval_freq == 200 and cfg.run.print_freq == 50
+    assert cfg.run.seed == 42
+
 
 def test_the_branch_blocks_match_the_single_branch_configs():
     """A co-training run and a solo run must differ only by the cross term, so
@@ -342,15 +348,30 @@ def test_the_branch_blocks_match_the_single_branch_configs():
 # --- boundary evaluation and best checkpoints --------------------------------
 
 def test_each_branchs_warmup_boundary_is_evaluated(tiny_run):
-    """Branch 1's warmup ends at macro 2 and branch 2's inside macro 2 as well;
-    eval_freq is 3, so neither would be evaluated on the cadence."""
+    """eval_freq is 3, so neither boundary sits on the cadence.
+
+    Branch 2's warmup is set to 3 micro-steps against steps_per_macro 2, on
+    purpose: its warmup then ends PART WAY through macro 2, which is the only
+    case that distinguishes the reference's `>=` plus look-back from a naive
+    `step2 == warmup_steps`. At the fixture's original 4/2 the boundary landed
+    exactly on a macro edge and both forms fired at the same macro-step, so the
+    test passed on either. The shipped 500/10 is likewise a clean multiple --
+    this is about the formula surviving a warmup that is not.
+    """
     config_path, output_dir = tiny_run
+    raw = yaml.safe_load(config_path.read_text())
+    raw["branches"][1]["warmup_steps"] = 3
+    config_path.write_text(yaml.safe_dump(raw))
+
     train.main(["--config", str(config_path)])
     tagged = {r["macro"]: r["at_warmup_end"] for r in rows(output_dir)
               if r.get("at_warmup_end")}
+
     assert 2 in tagged, tagged
     assert any("lora" in tag for tag in tagged[2])
-    assert any("vlp" in tag for tag in tagged[2])
+    assert any("vlp" in tag for tag in tagged[2]), (
+        "branch 2's boundary was missed: step2 goes 2, 4 and never equals 3"
+    )
     assert 2 % 3 != 0, "eval_freq would have covered it anyway"
 
 
@@ -364,9 +385,105 @@ def test_a_best_checkpoint_is_written_per_model(tiny_run, monkeypatch):
         a, b = next(scores)
         return {"lora": EvalResult(a, 0.0, 0, 1), "vlp": EvalResult(b, 0.0, 0, 1)}
 
+    written: list[tuple[str, int]] = []
+    real_save = torch.save
+
+    def counting_save(payload, path, *args, **kwargs):
+        written.append((Path(path).name, len(payload)))
+        return real_save(payload, path, *args, **kwargs)
+
     monkeypatch.setattr(train, "evaluate_ensemble", fake)
+    monkeypatch.setattr(torch, "save", counting_save)
     train.main(["--config", str(config_path)])
 
-    assert (output_dir / "model-best-lora.pt").is_file()
-    assert (output_dir / "model-best-vlp.pt").is_file()
-    assert (output_dir / "model-last.pt").is_file()
+    names = [name for name, _ in written]
+    # lora improves at every evaluation (10 -> 30 -> 50), vlp only at the first
+    # (90 -> 70 -> 40). Asserting the files merely EXIST passes on a build that
+    # rewrites both at every evaluation, since both are written the first time.
+    assert names.count("model-best-lora.pt") == 3
+    assert names.count("model-best-vlp.pt") == 1
+    assert names.count("model-last.pt") == 3
+
+    # Each file holds only its own model: a combined snapshot would carry the
+    # other branch's weights as of this branch's peak.
+    assert dict(written)["model-best-lora.pt"] == 1
+    assert dict(written)["model-best-vlp.pt"] == 1
+    assert dict(written)["model-last.pt"] == 2
+    assert set(torch.load(output_dir / "model-best-lora.pt",
+                          weights_only=True)) == {"lora"}
+    assert set(torch.load(output_dir / "model-best-vlp.pt",
+                          weights_only=True)) == {"vlp"}
+
+
+def test_branch_twos_cross_reference_comes_from_branch_ones_TEACHER(
+        tiny_run, monkeypatch):
+    """Swapping lora["teacher_logits"] for lora["model"].logits at the cross site
+    keeps every logged number plausible and every other test green, while
+    silently removing the EMA from one of the two teaching directions. The other
+    direction is traced this way by the staleness test; this is its mirror.
+
+    Only the TEACHER is stubbed, and with a sharp non-uniform distribution. The
+    student is left alone -- patching it too would break branch 1's own backward,
+    and a constant would be indistinguishable after softmax anyway.
+    """
+    from cmct.branches.lora_model import LoraModel
+
+    config_path, _ = tiny_run
+    marker = torch.tensor([12.0, 0.0, 0.0])
+    monkeypatch.setattr(LoraModel, "teacher_logits",
+                        lambda self, images: marker.repeat(images.shape[0], 1))
+
+    seen = []
+    real_cross = train.cross_loss
+
+    def spy(**kwargs):
+        if kwargs.get("branch") == "vlp":
+            seen.append(kwargs["reference_probabilities"][0].clone())
+        return real_cross(**kwargs)
+
+    monkeypatch.setattr(train, "cross_loss", spy)
+    train.main(["--config", str(config_path)])
+
+    assert seen, "branch 2's cross term never ran"
+    expected = torch.softmax(marker, dim=-1)
+    for probabilities in seen:
+        assert torch.allclose(probabilities, expected, atol=1e-5), (
+            f"branch 2's cross reference was {probabilities.tolist()}, not the "
+            f"teacher's {expected.tolist()} -- it came from another model"
+        )
+
+
+def test_branch_ones_scheduler_is_wired_with_its_warmup(tiny_run):
+    """build_lr_scheduler takes `warmup` as an optional argument -- build_vlp
+    deliberately omits it -- so dropping it in build_lora is a one-line slip no
+    other test notices. It would run branch 1's cosine at amplitude `lr` from
+    macro 0 instead of holding `warmup_lr` flat: a 3.5x learning-rate error
+    through every warmup step, with the suite still green.
+
+    The assertion has to compare against BOTH wirings, or it passes on either.
+    """
+    from cmct.engine import lr_at
+
+    config_path, _ = tiny_run
+    # Stop INSIDE the warmup. At the end of the run the cosine has decayed to
+    # ~0 under either wiring, so the two become indistinguishable there.
+    steps = 1
+    train.main(["--config", str(config_path), "--max-macro-steps", str(steps)])
+    state = train.LAST_STATE
+    optim_cfg = state["lora"]["config"].optim
+    warmup = state["lora"]["config"].warmup_steps
+    total = state["lora"]["total_steps"]
+
+    assert warmup > steps and optim_cfg.warmup_lr != optim_cfg.lr, \
+        "this config cannot distinguish the two wirings"
+
+    with_warmup = lr_at(steps, optim_cfg, total, warmup)
+    without_warmup = lr_at(steps, optim_cfg, total, 0)
+    assert with_warmup != pytest.approx(without_warmup), \
+        "the two wirings agree here, so this test proves nothing"
+
+    actual = state["lora"]["optimizer"].param_groups[0]["lr"]
+    assert actual == pytest.approx(with_warmup, rel=1e-9), (
+        f"lr after the run is {actual}; warmup-aware wiring gives {with_warmup}, "
+        f"the slip gives {without_warmup}"
+    )

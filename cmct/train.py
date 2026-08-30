@@ -21,6 +21,13 @@ Each branch has its OWN warmup, counted in its own steps, and has no cross term
 until its own warmup ends. The two warmups are separate knobs and are not
 derived from one another.
 
+Known, deliberate omission: inside its print block the reference runs one extra
+`model2.predict(data_x2)` to report a source accuracy, and because the head is
+still in train mode that forward updates its BatchNorm running stats -- `no_grad`
+does not stop BatchNorm, only `eval()` does. Reproducing it would tie the trained
+numbers to `print_freq`, which is worse than the discrepancy it removes: 20 extra
+source-side updates against 20,000 in-loop ones at the shipped settings.
+
 Usage:
     python -m cmct.train --config configs/experiment/cmct_officehome_a2c.yaml
 """
@@ -440,16 +447,26 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                   + "  ".join(f"{key} {scores[key].accuracy:.2f}% "
                               f"(best {best[key]:.2f}%)" for key in reported))
 
-            # The teacher's factors for branch 1 and the whole of branch 2 --
-            # what evaluation just scored. Saved per branch on ITS OWN
-            # improvement, because the two bests move independently: one file
-            # keyed to a single branch would leave the other's best model
-            # unrecoverable, and that is the asymmetry this run exists to find.
-            snapshot = {"lora": lora["model"].teacher_lora_state_dict(),
-                        "vlp": vlp["model"].state_dict()}
-            torch.save(snapshot, output_dir / "model-last.pt")
+            # The teacher's factors for branch 1, the whole of branch 2 -- what
+            # evaluation just scored. Saved per model on ITS OWN improvement,
+            # because the two bests move independently and one file keyed to a
+            # single branch would leave the other's best model unrecoverable.
+            #
+            # Each file holds ONLY the model it is named for. The reference does
+            # the same (separate LoRA-best and model2-best.pt), and the combined
+            # form is worse than untidy: model-best-<branch 1> would carry
+            # branch 2's weights as of branch 1's peak, a state nothing reports
+            # and nothing can use, at roughly 1.2 GB per copy since
+            # VlpModel.state_dict holds both CLIP towers.
+            parts = {lora["name"]: {"lora": lora["model"].teacher_lora_state_dict()},
+                     vlp["name"]: {"vlp": vlp["model"].state_dict()}}
+            torch.save({**parts[lora["name"]], **parts[vlp["name"]]},
+                       output_dir / "model-last.pt")
             for key in improved:
-                torch.save(snapshot, output_dir / f"model-best-{key}.pt")
+                # "ensemble" is the one key whose model really is both branches.
+                payload = ({**parts[lora["name"]], **parts[vlp["name"]]}
+                           if key == "ensemble" else parts[key])
+                torch.save(payload, output_dir / f"model-best-{key}.pt")
 
         with metrics_path.open("a") as handle:
             handle.write(json.dumps(row) + "\n")
