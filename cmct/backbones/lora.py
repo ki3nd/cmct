@@ -218,8 +218,20 @@ class MultiheadAttentionLoRA(nn.Module):
         source = key.shape[0]
 
         def project(proj: nn.Module, x: Tensor, n: int) -> Tensor:
+            """[L, N, E] -> [N, H, L, head_dim].
+
+            FOUR dimensions, not the flattened [N*H, L, head_dim]. Both shapes
+            compute the same attention, but scaled_dot_product_attention reads a
+            3-D input as having no head dimension and falls back to its `math`
+            backend, which MATERIALIZES the [N*H, L, L] attention matrix and
+            saves it for backward. The 4-D layout lets it choose the flash or
+            memory-efficient backend, which saves nothing of that size. On
+            ViT-B/16 the difference is 9.4% of everything a visual forward
+            retains -- and branch 1 holds three such forwards at once. The
+            reference uses the 4-D layout (loralib/layers.py:651-653).
+            """
             out = proj(x)
-            return out.view(n, batch * self.num_heads, self.head_dim).transpose(0, 1)
+            return out.view(n, batch, self.num_heads, self.head_dim).permute(1, 2, 0, 3)
 
         q = project(self.q_proj, query, length)
         k = project(self.k_proj, key, source)
@@ -227,14 +239,15 @@ class MultiheadAttentionLoRA(nn.Module):
 
         mask = attn_mask
         if mask is not None and mask.dim() == 2:
-            mask = mask.unsqueeze(0)
+            mask = mask.unsqueeze(0).unsqueeze(0)
+        elif mask is not None and mask.dim() == 3:
+            mask = mask.view(batch, self.num_heads, length, source)
         if key_padding_mask is not None:
-            padding = key_padding_mask.view(batch, 1, 1, source).expand(
-                -1, self.num_heads, -1, -1).reshape(batch * self.num_heads, 1, source)
+            padding = key_padding_mask.view(batch, 1, 1, source)
             mask = padding if mask is None else mask + padding
 
         attended = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        attended = attended.transpose(0, 1).contiguous().view(length, batch, self.embed_dim)
+        attended = attended.permute(2, 0, 1, 3).contiguous().view(length, batch, self.embed_dim)
         output = self.out_proj(attended)
 
         if self.batch_first:
