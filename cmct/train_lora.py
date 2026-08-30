@@ -197,7 +197,7 @@ def main(argv: list[str] | None = None) -> float:
 
     device = args.device or cfg.run.device
     if device.startswith("cuda") and not torch.cuda.is_available():
-        print(f"{device} is not available, falling back to cpu")
+        print(f"{device} is not available, falling back to cpu", flush=True)
         device = "cpu"
 
     output_dir = Path(cfg.run.output_dir)
@@ -214,10 +214,10 @@ def main(argv: list[str] | None = None) -> float:
     eval_every = cfg.run.eval_freq * branch.steps_per_macro
     print_every = cfg.run.print_freq * branch.steps_per_macro
 
-    print("=" * 78)
-    print(f"resolved config ({args.config})")
-    print("=" * 78)
-    print(format_config(cfg), end="")
+    print("=" * 78, flush=True)
+    print(f"resolved config ({args.config})", flush=True)
+    print("=" * 78, flush=True)
+    print(format_config(cfg), end="", flush=True)
 
     split = build_split(cfg.dataset, cfg.data)
     param_dtype = (torch.float16 if branch.backbone.dtype == "fp16"
@@ -276,13 +276,13 @@ def main(argv: list[str] | None = None) -> float:
                                      ema_momentum(last, branch.ema)],
         "output_dir": str(output_dir),
     }
-    print("-" * 78)
-    print("derived")
-    print("-" * 78)
+    print("-" * 78, flush=True)
+    print("derived", flush=True)
+    print("-" * 78, flush=True)
     width = max(len(k) for k in derived)
     for key, value in derived.items():
-        print(f"  {key:<{width}}  {value}")
-    print("-" * 78)
+        print(f"  {key:<{width}}  {value}", flush=True)
+    print("-" * 78, flush=True)
     (output_dir / "run.json").write_text(json.dumps(derived, indent=2) + "\n")
 
     stream = BatchSource(split, cfg.dataset, branch, cfg.run.seed)
@@ -342,7 +342,7 @@ def main(argv: list[str] | None = None) -> float:
                   f"pl {float(out.pseudo_label.detach()):.4f} "
                   f"mmd {float(out.mmd.detach()):.4f}) "
                   f"mask {out.mask_ratio:.2f} ref {out.reference} "
-                  f"lr {current_lr:.3e}")
+                  f"lr {current_lr:.3e}", flush=True)
 
         # The warmup boundary gets its own evaluation regardless of the cadence.
         # It is the one step where the branch changes what it learns from -- the
@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> float:
             tag = "  (end of warmup)" if at_warmup_end else ""
             print(f"[eval] step {step + 1}{tag}  teacher {teacher.accuracy:.2f}% "
                   f"(loss {teacher.loss:.4f})  student {student.accuracy:.2f}% "
-                  f"(loss {student.loss:.4f})  best teacher {best:.2f}%")
+                  f"(loss {student.loss:.4f})  best teacher {best:.2f}%", flush=True)
             with metrics_path.open("a") as handle:
                 handle.write(json.dumps({
                     "step": step + 1,
@@ -391,7 +391,7 @@ def main(argv: list[str] | None = None) -> float:
             if improved:
                 torch.save(model.teacher_lora_state_dict(), output_dir / "model-best.pt")
 
-    print(f"done in {time.time() - started:.1f}s. best teacher accuracy {best:.2f}%")
+    print(f"done in {time.time() - started:.1f}s. best teacher accuracy {best:.2f}%", flush=True)
     LAST_MODEL = model
     return best
 

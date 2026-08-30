@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> float:
 
     device = args.device or cfg.run.device
     if device.startswith("cuda") and not torch.cuda.is_available():
-        print(f"{device} is not available, falling back to cpu")
+        print(f"{device} is not available, falling back to cpu", flush=True)
         device = "cpu"
 
     output_dir = Path(cfg.run.output_dir)
@@ -122,10 +122,10 @@ def main(argv: list[str] | None = None) -> float:
 
     # Every setting that governs the run, verbatim -- the same text that goes to
     # config.yaml, so the log and the file cannot disagree.
-    print("=" * 78)
-    print(f"resolved config ({args.config})")
-    print("=" * 78)
-    print(format_config(cfg), end="")
+    print("=" * 78, flush=True)
+    print(f"resolved config ({args.config})", flush=True)
+    print("=" * 78, flush=True)
+    print(format_config(cfg), end="", flush=True)
 
     # the final step always evaluates, so it counts even when it is not on the cadence
     n_evals = len({*range(eval_every, run_steps + 1, eval_every), run_steps})
@@ -166,13 +166,13 @@ def main(argv: list[str] | None = None) -> float:
                                     sigmoid_ramp(total_steps, total_steps)],
         "output_dir": str(output_dir),
     }
-    print("-" * 78)
-    print("derived")
-    print("-" * 78)
+    print("-" * 78, flush=True)
+    print("derived", flush=True)
+    print("-" * 78, flush=True)
     width = max(len(k) for k in derived)
     for key, value in derived.items():
-        print(f"  {key:<{width}}  {value}")
-    print("-" * 78)
+        print(f"  {key:<{width}}  {value}", flush=True)
+    print("-" * 78, flush=True)
     (output_dir / "run.json").write_text(json.dumps(derived, indent=2) + "\n")
 
     stream = BatchSource(split, cfg.dataset, branch, cfg.run.seed)
@@ -221,7 +221,8 @@ def main(argv: list[str] | None = None) -> float:
                   f"task {float(out.task.detach()):.4f} "
                   f"distill {float(out.distill.detach()):.4f} "
                   f"reg {float(out.reg.detach()):.4f}) "
-                  f"ramp {out.ramp:.4f}  lr {lr_at(step + 1, branch.optim, total_steps):.3e}")
+                  f"ramp {out.ramp:.4f}  "
+                  f"lr {lr_at(step + 1, branch.optim, total_steps):.3e}", flush=True)
 
         if (step + 1) % eval_every == 0 or (step + 1) == run_steps:
             model.eval()
@@ -230,7 +231,7 @@ def main(argv: list[str] | None = None) -> float:
             best = max(best, student.accuracy)
             print(f"[eval] step {step + 1}  student {student.accuracy:.2f}% "
                   f"(loss {student.loss:.4f})  teacher {teacher.accuracy:.2f}% "
-                  f"(loss {teacher.loss:.4f})  best student {best:.2f}%")
+                  f"(loss {teacher.loss:.4f})  best student {best:.2f}%", flush=True)
             with metrics_path.open("a") as handle:
                 handle.write(json.dumps({
                     "step": step + 1,
@@ -247,7 +248,7 @@ def main(argv: list[str] | None = None) -> float:
                 torch.save(model.state_dict(), output_dir / "model-best.pt")
             torch.save(model.state_dict(), output_dir / "model-last.pt")
 
-    print(f"done in {time.time() - started:.1f}s. best student accuracy {best:.2f}%")
+    print(f"done in {time.time() - started:.1f}s. best student accuracy {best:.2f}%", flush=True)
     return best
 
 

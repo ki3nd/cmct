@@ -202,7 +202,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
 
     device = args.device or cfg.run.device
     if device.startswith("cuda") and not torch.cuda.is_available():
-        print(f"{device} is not available, falling back to cpu")
+        print(f"{device} is not available, falling back to cpu", flush=True)
         device = "cpu"
 
     output_dir = Path(cfg.run.output_dir)
@@ -215,10 +215,10 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     run_macro = (macro_steps if args.max_macro_steps is None
                  else min(args.max_macro_steps, macro_steps))
 
-    print("=" * 78)
-    print(f"resolved config ({args.config})")
-    print("=" * 78)
-    print(format_config(cfg), end="")
+    print("=" * 78, flush=True)
+    print(f"resolved config ({args.config})", flush=True)
+    print("=" * 78, flush=True)
+    print(format_config(cfg), end="", flush=True)
 
     debug = args.debug_memory
     memory("start", debug)
@@ -259,13 +259,13 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
         "print_every": cfg.run.print_freq,
         "output_dir": str(output_dir),
     }
-    print("-" * 78)
-    print("derived")
-    print("-" * 78)
+    print("-" * 78, flush=True)
+    print("derived", flush=True)
+    print("-" * 78, flush=True)
     width = max(len(k) for k in derived)
     for key, value in derived.items():
-        print(f"  {key:<{width}}  {value}")
-    print("-" * 78)
+        print(f"  {key:<{width}}  {value}", flush=True)
+    print("-" * 78, flush=True)
     (output_dir / "run.json").write_text(json.dumps(derived, indent=2) + "\n")
 
     # Every reported model gets its OWN best. A single best following one chosen
@@ -400,7 +400,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             lora["model"].release_zero_shot()
 
         if debug:
-            print("  [mem] stopping after one macro-step (--debug-memory)")
+            print("  [mem] stopping after one macro-step (--debug-memory)", flush=True)
             return best
 
         row = {
@@ -436,7 +436,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                   f"ref {reference_name})  "
                   f"{name2} {total2:.4f} (clf {clf2:.4f} "
                   f"cross {cross2_value:.4f} mask {cross2_mask:.2f})  "
-                  f"lr {lr1:.3e}")
+                  f"lr {lr1:.3e}", flush=True)
 
         # Each branch's warmup boundary earns an evaluation of its own, off the
         # cadence: it is the step where that branch starts learning from the
@@ -474,7 +474,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             print("[eval] macro " + str(macro + 1)
                   + ("  (" + ", ".join(tags) + ")" if tags else "") + "  "
                   + "  ".join(f"{key} {scores[key].accuracy:.2f}% "
-                              f"(best {best[key]:.2f}%)" for key in reported))
+                              f"(best {best[key]:.2f}%)" for key in reported), flush=True)
 
             # The teacher's factors for branch 1, the whole of branch 2 -- what
             # evaluation just scored. Saved per model on ITS OWN improvement,
@@ -501,7 +501,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             handle.write(json.dumps(row) + "\n")
 
     print(f"done in {time.time() - started:.1f}s. " + "  ".join(
-        f"best {key} {best[key]:.2f}%" for key in reported))
+        f"best {key} {best[key]:.2f}%" for key in reported), flush=True)
     LAST_STATE = {"lora": lora, "vlp": vlp, "best": best, "reported": reported}
     return best
 
