@@ -114,9 +114,6 @@ class EmaConfig:
 class PseudoLabelConfig:
     threshold: float = 0.85
     self_reduce: Literal["mask", "ratio"] = "mask"
-    cross_reduce: Literal["mask", "ratio"] = "mask"
-    """Separate from self_reduce because the two reference distributions sit in
-    different mask-sparsity regimes."""
 
 
 @dataclass
@@ -151,7 +148,20 @@ class BranchConfig:
 class CoTrainConfig:
     cross_ref_refresh: Literal["macro", "micro"]
     total_macro_steps: int = 1000
-    ensemble: Literal["mean_prob", "mean_logit"] = "mean_prob"
+    ensemble: Literal["off", "mean_prob", "mean_logit"] = "off"
+    """Whether to also score the two teachers combined, and how.
+
+    "off" (default) computes no ensemble at all -- there is no ensemble number
+    anywhere, rather than one computed and hidden. A deviation: the reference
+    always reports all three (train_mfa_v2.py:266-289). Off here because the
+    first question is whether cross-teaching helps each branch on its own, and
+    an ensemble number mixes that with a second question.
+
+    "mean_prob" averages probabilities, which is what the reference does.
+    "mean_logit" averages logits and is NOT equivalent: branch 1's logits are
+    `logit_scale * cosine` with logit_scale around 100 while branch 2's come
+    from a linear head, so averaging logits weights branch 1 far more heavily.
+    It exists to make that visible."""
 
 
 @dataclass

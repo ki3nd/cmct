@@ -88,7 +88,6 @@ branches:
       threshold: 0.85
       self_reduce: mask
       # Unused: this run has no cross term.
-      cross_reduce: mask
     steps_per_macro: 1
     # The reference's --s1-warmup-iters. Through these steps the pseudo-label
     # reference is the frozen zero-shot CLIP; afterwards it is the EMA teacher,

@@ -80,7 +80,6 @@ branches:
     pseudo_label:
       threshold: 0.85
       self_reduce: mask
-      cross_reduce: mask
     steps_per_macro: 1
     # No cross-teaching in this run.
     cross_weight: 0.0

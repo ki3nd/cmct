@@ -39,25 +39,26 @@ def sample(n=16, k=7, seed=0, sharpness=6.0):
 
 # --- parity ------------------------------------------------------------------
 
-@pytest.mark.parametrize("reduce", ["mask", "ratio"])
 @pytest.mark.parametrize("threshold", [0.85, 0.5, 0.99])
-def test_matches_the_reference_bit_for_bit(reduce, threshold):
+def test_matches_the_reference_bit_for_bit(threshold):
+    """Against the reference called the way both cross sites call it: with its
+    `mode` left at the default (train_mfa_v2.py:861 omits the argument, :924
+    passes a flag whose default is "mask")."""
     logits, reference = sample()
-    theirs = reference_pseudo_label_loss(threshold)(logits, reference, reduce)
+    theirs = reference_pseudo_label_loss(threshold)(logits, reference)
     ours = cross_loss(target_logits=logits, reference_probabilities=reference,
-                      threshold=threshold, reduce=reduce)
+                      threshold=threshold)
     assert float(ours.value) == float(theirs)
 
 
-def test_the_two_reductions_actually_differ_on_this_input():
-    """Otherwise the parity test above would pass on a function that ignored
-    `reduce` entirely."""
+def test_the_reduction_is_the_masked_one_not_the_ratio_one():
+    """The reference's other reduction, which nothing selects. If our value
+    matched it too, the parity test above would prove nothing about which one we
+    compute."""
     logits, reference = sample()
-    masked = cross_loss(target_logits=logits, reference_probabilities=reference,
-                        reduce="mask").value
-    ratio = cross_loss(target_logits=logits, reference_probabilities=reference,
-                       reduce="ratio").value
-    assert abs(float(masked) - float(ratio)) > 1e-3
+    ratio = reference_pseudo_label_loss(0.85)(logits, reference, "ratio")
+    ours = cross_loss(target_logits=logits, reference_probabilities=reference)
+    assert abs(float(ours.value) - float(ratio)) > 1e-3
 
 
 # --- reporting ---------------------------------------------------------------

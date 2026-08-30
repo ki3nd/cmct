@@ -13,7 +13,6 @@ per direction rather than once.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
 from torch import Tensor
 
@@ -41,10 +40,16 @@ class CrossOutput:
 
 
 def cross_loss(*, target_logits: Tensor, reference_probabilities: Tensor,
-               threshold: float = 0.85,
-               reduce: Literal["mask", "ratio"] = "mask",
-               mode: str = "mask", branch: str = "") -> CrossOutput:
+               threshold: float = 0.85, mode: str = "mask",
+               branch: str = "") -> CrossOutput:
     """Masked cross-entropy on the other branch's teacher's argmax.
+
+    The reduction is always the masked one -- sum over the samples clearing the
+    threshold, divided by how many did. The reference's third parameter can also
+    select a "ratio" reduction, but neither branch's cross call ever passes
+    anything but the default (train_mfa_v2.py:861 omits it; :924 passes a flag
+    whose default is "mask"), so exposing the choice here would add a knob that
+    reproduces nothing.
 
     Keyword-only: `target_logits` and `reference_probabilities` have the same
     shape, so a positional swap would train the student to predict itself
@@ -57,6 +62,6 @@ def cross_loss(*, target_logits: Tensor, reference_probabilities: Tensor,
         )
     return CrossOutput(
         value=pseudo_label_ce(target_logits, reference_probabilities,
-                              threshold, reduce),
+                              threshold, "mask"),
         mask_ratio=pass_fraction(reference_probabilities, threshold),
     )

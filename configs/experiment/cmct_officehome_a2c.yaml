@@ -48,7 +48,6 @@ branches:
     pseudo_label:
       threshold: 0.85
       self_reduce: mask
-      cross_reduce: mask
     steps_per_macro: 1
     warmup_steps: 50
     cross_weight: 0.5
@@ -91,7 +90,6 @@ branches:
     pseudo_label:
       threshold: 0.85
       self_reduce: mask
-      cross_reduce: mask
     steps_per_macro: 10
     warmup_steps: 500
     cross_weight: 0.5
