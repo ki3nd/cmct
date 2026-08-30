@@ -433,3 +433,41 @@ def test_matching_fp16_is_accepted(tiny_clip):
     layer = next(m for m in model.student.modules() if isinstance(m, LoRALinear))
     assert layer.weight.dtype is torch.float16
     assert layer.lora_A.dtype is torch.float32
+
+
+def test_the_two_logits_functions_track_the_models_they_are_named_after():
+    """A swap here would be invisible: both functions return the right shape, the
+    numbers look plausible, and the only symptom is the teacher and student
+    accuracies trading places in the log.
+
+    So this perturbs one model at a time and checks that exactly the matching
+    function moves. It starts from a hard copy, because two models that already
+    disagree cannot tell you which function read which.
+    """
+    model = build(fresh_clip())
+    model.train(False)
+    batch = images(4)
+
+    model.ema_update(0.0)                      # teacher := student
+    student_before = model.logits(batch).clone()
+    teacher_before = model.teacher_logits(batch).clone()
+    assert torch.allclose(student_before, teacher_before, atol=1e-6), \
+        "the hard copy did not equalize them, so the rest of this test is unsound"
+
+    with torch.no_grad():
+        for _, param in lora_parameters(model.student):
+            param.add_(0.5)
+    student_after = model.logits(batch)
+    teacher_after = model.teacher_logits(batch)
+    assert (student_after - student_before).abs().max() > 1e-2, \
+        "model.logits ignored a change to the student"
+    assert (teacher_after - teacher_before).abs().max() < 1e-5, \
+        "model.teacher_logits followed the student"
+
+    with torch.no_grad():
+        for _, param in lora_parameters(model.teacher):
+            param.add_(0.5)
+    assert (model.teacher_logits(batch) - teacher_after).abs().max() > 1e-2, \
+        "model.teacher_logits ignored a change to the teacher"
+    assert (model.logits(batch) - student_after).abs().max() < 1e-5, \
+        "model.logits followed the teacher"
