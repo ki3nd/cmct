@@ -1,0 +1,25 @@
+# Runtime dependencies. Mirrors [project.dependencies] in pyproject.toml, which
+# stays the source of truth -- this file exists for environments that install
+# with plain pip and never see the package metadata (Kaggle, Colab).
+#
+#   pip install -r requirements.txt
+#
+# torch and torchvision are deliberately UNPINNED: the right build depends on
+# the CUDA version of the machine, and pinning a +cuXXX wheel here would break
+# every machine but the one it was written on. Kaggle and Colab ship a working
+# pair already -- install the rest and leave theirs alone:
+#
+#   pip install -r requirements.txt --no-deps
+#
+# For a CPU or a specific CUDA build, pick the index first:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+torch>=2.0
+torchvision>=0.15
+numpy
+pillow
+pyyaml
+
+# The vendored CLIP tokenizer (cmct/backbones/clip/tokenizer.py) imports both.
+regex
+ftfy
