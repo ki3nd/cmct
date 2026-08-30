@@ -410,6 +410,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
             f"{lora['name']}_mmd": float(out1.mmd.detach()),
             f"{lora['name']}_self": float(out1.pseudo_label.detach()),
             f"{lora['name']}_cross": cross1_value,
+            f"{lora['name']}_self_mask": out1.mask_ratio,
             f"{lora['name']}_cross_mask": cross1_mask,
             f"{lora['name']}_reference": reference_name,
             f"{vlp['name']}_loss": float(loss2.detach()),
@@ -429,13 +430,24 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                         lora_cfg.warmup_steps)
             src1, mmd1 = row[f"{name1}_source_ce"], row[f"{name1}_mmd"]
             clf2 = row[f"{name2}_clf"]
+            # Branch 2's self-training is CMKD, whose three parts share one ramp
+            # and mean nothing apart; the sum is what compares to branch 1's
+            # `self`.
+            cmkd2 = (row[f"{name2}_task"] + row[f"{name2}_distill"]
+                     + row[f"{name2}_reg"])
+            # Each masked term names its OWN mask. Branch 1 has two -- one per
+            # pseudo-label term, both at the same threshold but against
+            # different references, so they are not interchangeable and were
+            # never one number. Branch 2 has one: its self loss is CMKD, which
+            # weights every target sample by a coefficient instead of gating on
+            # a threshold, so there is no self mask to report.
             print(f"macro {macro + 1}/{run_macro}  "
                   f"{name1} {total1:.4f} (src {src1:.4f} mmd {mmd1:.4f} "
-                  f"self {self1:.4f} "
-                  f"cross {cross1_value:.4f} mask {cross1_mask:.2f} "
+                  f"self {self1:.4f} self_mask {out1.mask_ratio:.2f} "
+                  f"cross {cross1_value:.4f} cross_mask {cross1_mask:.2f} "
                   f"ref {reference_name})  "
-                  f"{name2} {total2:.4f} (clf {clf2:.4f} "
-                  f"cross {cross2_value:.4f} mask {cross2_mask:.2f})  "
+                  f"{name2} {total2:.4f} (clf {clf2:.4f} cmkd {cmkd2:.4f} "
+                  f"cross {cross2_value:.4f} cross_mask {cross2_mask:.2f})  "
                   f"lr {lr1:.3e}", flush=True)
 
         # Each branch's warmup boundary earns an evaluation of its own, off the
