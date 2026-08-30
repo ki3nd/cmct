@@ -1,109 +1,134 @@
-dataset: officehome
+# Cross-model co-training: both branches, each teaching the other.
+#
+#   python -m cmct.train --config configs/experiment/cmct_officehome_a2c.yaml
+#
+# The two branch blocks are the SAME values the single-branch configs use
+# (lora_officehome_a2c.yaml, vlp_officehome_a2c.yaml), so a co-training run and
+# a solo run differ only by the cross term. Read those two files for the notes
+# on why branch 1's `lr` does not govern its learning rate, why its EMA is a
+# flat constant from step 0, and what `warmup_reference` selects.
+#
+# Only the co-training settings are new:
+#
+#   steps_per_macro   branch 2 takes 10 optimizer steps per macro-step, branch 1
+#                     takes 1. The reference's --s2-per-s1.
+#   warmup_steps      counted in each branch's OWN steps, so 50 macro-steps and
+#                     500 micro-steps are the same wall-clock point. Separate
+#                     knobs; nothing derives one from the other.
+#   cross_weight      0.5 both directions, constant -- NOT ramped. Branch 2's
+#                     self loss ramps while its cross term does not, so the
+#                     cross share shrinks over the run. The reference's design.
+#   cross_ref_refresh macro: branch 1 reads branch 2's teacher once per
+#                     macro-step, BEFORE branch 2 moves, so it is stale by 10
+#                     micro-steps. That is what the reference does. "micro"
+#                     recomputes it afterwards and is a deviation.
+#   ensemble          off: report each teacher separately. The reference always
+#                     reports the ensemble too; off here because the first
+#                     question is whether cross-teaching helps each branch, and
+#                     an ensemble mixes that with a second question.
+#   eval_freq         200 macro-steps, the reference's --eval-freq default.
 
+dataset: officehome
 data:
   root: /home/pc1175/DA-Research/data_root
-  source_domains: [art]
-  target_domains: [clipart]
+  source_domains:
+  - art
+  target_domains:
+  - clipart
   batch_size_test: 128
   num_workers_test: 8
   clarify_classnames: false
-
 cotrain:
   total_macro_steps: 1000
-  # macro: the cross-teaching reference is computed once per macro-step
-  # micro: recomputed at every branch step
   cross_ref_refresh: macro
-  ensemble: mean_prob
-
+  ensemble: 'off'
 branches:
-  - name: lora
-    type: lora_clip
-    backbone:
-      checkpoint: assets/ViT-B-16.pt
-      dtype: fp16
-    stream:
-      batch_size_x: 32
-      batch_size_u: 32
-      num_workers: 8
-      strong_aug: false
-    optim:
-      # NOTE: with scheduler warmup_cosine and warmup_steps > 0, `lr` has NO
-      # effect on the learning rate -- the cosine's amplitude is warmup_lr. That
-      # is what the reference does: CosineAnnealingLR scales the group's current
-      # lr recursively rather than reading base_lrs, and the reference overwrites
-      # that lr with warmup_lr on every warmup step. `lr` is kept here because it
-      # is the value the reference passes to the optimizer constructor, and
-      # dropping it would hide that the two differ by 3.5x.
-      lr: 0.0035
-      warmup_lr: 0.001
-      momentum: 0.9
-      weight_decay: 0.0005
-      grad_clip: 20.0
-      scheduler: warmup_cosine
-    ema:
-      # 0.99, the schema default. The codebase this comes from used 0.996
-      # (train.py:202, --s1-ema-momentum) -- this is a deliberate deviation.
-      momentum: 0.99
-      schedule: const
-    pseudo_label:
-      threshold: 0.85
-      self_reduce: mask
-    steps_per_macro: 1
-    warmup_steps: 50
-    cross_weight: 0.5
-    cross_mode: mask
-    extra:
-      mmd_weight: 1.0
-      lora_rank: 2
-      lora_alpha: 1.0
-      lora_dropout: 0.0
-      # q, k, v only -- NOT o, so out_proj keeps no LoRA. The wrapper class
-      # defaults to ['q','k','v','o'], but both trainer configs pass
-      # ['q','k','v'], and a class default is not a configuration.
-      lora_params: [q, k, v]
-      lora_encoder: both
-      lora_rank_ramp: [2, 4, 6, 8, 10]
-
-  - name: vlp
-    type: vlp_clip
-    backbone:
-      checkpoint: assets/ViT-B-16.pt
-      dtype: fp32
-    stream:
-      batch_size_x: 32
-      batch_size_u: 32
-      num_workers: 8
-      strong_aug: false
-    optim:
-      lr: 0.000003
-      momentum: 0.9
-      weight_decay: 0.0005
-      nesterov: true
-      scheduler: inv
-      gamma: 0.0003
-      decay: 0.75
-      param_group_multipliers:
-        classifier: 1000.0
-    ema:
-      momentum: 0.99
-      schedule: ramp
-    pseudo_label:
-      threshold: 0.85
-      self_reduce: mask
-    steps_per_macro: 10
-    warmup_steps: 500
-    cross_weight: 0.5
-    cross_mode: mask
-    extra:
-      label_smoothing: 0.1
-      lambda1: 0.25
-      lambda2: 0.1
-      lambda3: 0.025
-
+- name: lora
+  type: lora_clip
+  backbone:
+    checkpoint: ViT-B/16
+    dtype: fp16
+  stream:
+    batch_size_x: 32
+    batch_size_u: 32
+    num_workers: 8
+    strong_aug: false
+  optim:
+    lr: 0.0035
+    warmup_lr: 0.001
+    momentum: 0.9
+    weight_decay: 0.0005
+    nesterov: false
+    grad_clip: 20.0
+    scheduler: warmup_cosine
+  ema:
+    momentum: 0.99
+    schedule: const
+  pseudo_label:
+    threshold: 0.85
+    self_reduce: mask
+  steps_per_macro: 1
+  warmup_steps: 50
+  cross_weight: 0.5
+  cross_mode: mask
+  extra:
+    warmup_reference: zero_shot
+    mmd_weight: 1.0
+    lora_rank: 2
+    lora_alpha: 1.0
+    lora_dropout: 0.25
+    lora_params:
+    - q
+    - k
+    - v
+    lora_encoders:
+    - text
+    - vision
+    lora_positions: all
+    lora_rank_ramp:
+    - 2
+    - 4
+    - 6
+    - 8
+    - 10
+- name: vlp
+  type: vlp_clip
+  backbone:
+    checkpoint: ViT-B/16
+    dtype: fp32
+  stream:
+    batch_size_x: 32
+    batch_size_u: 32
+    num_workers: 8
+    strong_aug: false
+  optim:
+    lr: 3.0e-06
+    momentum: 0.9
+    weight_decay: 0.0005
+    nesterov: true
+    scheduler: inv
+    gamma: 0.0003
+    decay: 0.75
+    param_group_multipliers:
+      classifier: 1000.0
+  ema:
+    momentum: 0.99
+    schedule: ramp
+  pseudo_label:
+    threshold: 0.85
+    self_reduce: mask
+  steps_per_macro: 10
+  cross_weight: 0.5
+  cross_mode: mask
+  warmup_steps: 500
+  extra:
+    label_smoothing: 0.1
+    lambda1: 0.25
+    lambda2: 0.1
+    lambda3: 0.025
 run:
-  output_dir: outputs/officehome_a2c
+  output_dir: outputs/cmct_officehome_a2c
   seed: 42
   device: cuda:0
   print_freq: 50
-  # in macro-steps; x steps_per_macro = every 500 branch steps, 20 evals total
-  eval_freq: 50
+  eval_freq: 200
