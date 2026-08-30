@@ -430,11 +430,13 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                         lora_cfg.warmup_steps)
             src1, mmd1 = row[f"{name1}_source_ce"], row[f"{name1}_mmd"]
             clf2 = row[f"{name2}_clf"]
-            # Branch 2's self-training is CMKD, whose three parts share one ramp
-            # and mean nothing apart; the sum is what compares to branch 1's
-            # `self`.
-            cmkd2 = (row[f"{name2}_task"] + row[f"{name2}_distill"]
-                     + row[f"{name2}_reg"])
+            # CMKD's three parts, separately. The reference prints only their
+            # sum as `transfer`, but `reg` is the one worth watching on its own:
+            # it is the class-balance term, and its collapse toward zero is what
+            # precedes every class collapsing into one.
+            task2 = row[f"{name2}_task"]
+            distill2 = row[f"{name2}_distill"]
+            reg2 = row[f"{name2}_reg"]
             # Each masked term names its OWN mask. Branch 1 has two -- one per
             # pseudo-label term, both at the same threshold but against
             # different references, so they are not interchangeable and were
@@ -446,7 +448,8 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                   f"self {self1:.4f} self_mask {out1.mask_ratio:.2f} "
                   f"cross {cross1_value:.4f} cross_mask {cross1_mask:.2f} "
                   f"ref {reference_name})  "
-                  f"{name2} {total2:.4f} (clf {clf2:.4f} cmkd {cmkd2:.4f} "
+                  f"{name2} {total2:.4f} (clf {clf2:.4f} task {task2:.4f} "
+                  f"distill {distill2:.4f} reg {reg2:.4f} "
                   f"cross {cross2_value:.4f} cross_mask {cross2_mask:.2f})  "
                   f"lr {lr1:.3e}", flush=True)
 
