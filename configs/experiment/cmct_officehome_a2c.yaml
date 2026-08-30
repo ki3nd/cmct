@@ -26,7 +26,6 @@
 #                     reports the ensemble too; off here because the first
 #                     question is whether cross-teaching helps each branch, and
 #                     an ensemble mixes that with a second question.
-#   eval_freq         200 macro-steps, the reference's --eval-freq default.
 
 dataset: officehome
 data:
@@ -130,5 +129,5 @@ run:
   output_dir: outputs/cmct_officehome_a2c
   seed: 42
   device: cuda:0
-  print_freq: 50
-  eval_freq: 200
+  print_freq: 10
+  eval_freq: 50

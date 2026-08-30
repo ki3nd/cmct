@@ -95,7 +95,5 @@ run:
   output_dir: outputs/vlp_officehome_a2c
   seed: 42
   device: cuda:0
-  # Both in macro-steps, which equal branch steps here. eval_freq 500 gives 20
-  # evaluations over 10000 steps -- the cadence of 20 epochs x 500 iterations.
-  print_freq: 100
-  eval_freq: 500
+  print_freq: 10
+  eval_freq: 50

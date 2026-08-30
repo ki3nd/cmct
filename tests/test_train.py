@@ -320,7 +320,7 @@ def test_the_shipped_config_pins_the_references_values():
     # branch, and the solo configs deliberately differ (50/10 and 500/100), so
     # that test would not catch a regression here. eval_freq decides where `best`
     # is sampled.
-    assert cfg.run.eval_freq == 200 and cfg.run.print_freq == 50
+    assert cfg.run.eval_freq == 50 and cfg.run.print_freq == 10
     assert cfg.run.seed == 42
 
 

@@ -126,5 +126,4 @@ run:
   seed: 42
   device: cuda:0
   print_freq: 10
-  # 20 evaluations over 1000 steps.
   eval_freq: 50
