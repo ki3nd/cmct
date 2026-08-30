@@ -191,8 +191,13 @@ def test_run_json_records_that_lr_does_not_govern(tiny_run):
     config_path, output_dir = tiny_run
     train_lora.main(["--config", str(config_path)])
     derived = json.loads((output_dir / "run.json").read_text())
-    assert derived["config_lr_unused"] == 0.0035
-    assert derived["lr_first_last"][0] == pytest.approx(0.001)
+    # Compared against the config, not against a literal: pinning the numbers
+    # here would make every experiment tweak a test failure. What must hold is
+    # that `lr` is reported as unused and the schedule starts at `warmup_lr`.
+    branch = load_experiment(config_path).branches[0]
+    assert derived["config_lr_unused"] == branch.optim.lr
+    assert derived["lr_first_last"][0] == pytest.approx(branch.optim.warmup_lr)
+    assert branch.optim.lr != branch.optim.warmup_lr, "the two must differ here"
 
 
 def test_prompt_examples_are_normalized(tiny_run):

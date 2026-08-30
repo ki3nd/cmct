@@ -313,7 +313,15 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
                 source_label=batch2.label_x,
                 source_cosine_logits=vlp["model"].encoder.cosine_logits(source_features),
                 target_logits=target_logits2,
-                target_cosine_logits=vlp["model"].encoder.cosine_logits(target_features),
+                # CMKD's self reference is the TEACHER's cosine branch, not the
+                # student's. This is `--s2-self-from-teacher`, which the run this
+                # config reproduces passes (phpl/train_mfa_v2.py:471-475: a
+                # separate no-grad forward through teacher_model, detached).
+                # Without it CMKD distils the student toward its own cosine
+                # output, so the only thing damping a confident mistake is the
+                # gini weighting; with it the reference is a model the student
+                # cannot instantaneously drag along.
+                target_cosine_logits=vlp["model"].teacher_cosine_logits(batch2.img_u),
                 step=step2,
             )
             loss2 = out2.total

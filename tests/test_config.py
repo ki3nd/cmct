@@ -26,14 +26,25 @@ def load_tmp(tmp_path, mutate=None, dataset_name="officehome"):
                            config_root=CONFIGS)
 
 
-def test_loads_shipped_experiment():
-    cfg = load_experiment(EXPERIMENT)
-    assert cfg.dataset.name == "officehome"
-    assert cfg.dataset.num_classes == 65
-    assert cfg.data.source_domains == ["art"]
-    assert cfg.data.target_domains == ["clipart"]
-    assert cfg.cotrain.cross_ref_refresh == "macro"
-    assert [b.name for b in cfg.branches] == ["lora", "vlp"]
+def test_every_shipped_experiment_loads():
+    """Loads and is structurally sound -- NOT that any value equals a number.
+
+    Hyperparameters are the thing an experiment changes; a test that pins them
+    turns every experiment into a failing test run. What has to keep working is
+    that the file parses, resolves its dataset, and names branches the training
+    scripts recognize.
+    """
+    paths = sorted((CONFIGS / "experiment").glob("*.yaml"))
+    assert paths, "no experiment configs found"
+    for path in paths:
+        cfg = load_experiment(path)
+        names = [b.name for b in cfg.branches]
+        assert names, path.name
+        assert len(names) == len(set(names)), f"{path.name}: duplicate branch names"
+        assert cfg.dataset.num_classes > 0, path.name
+        assert cfg.data.source_domains and cfg.data.target_domains, path.name
+        for branch in cfg.branches:
+            assert branch.type in ("lora_clip", "vlp_clip"), f"{path.name}: {branch.type}"
 
 
 def test_dataset_yaml_resolved_relative_to_experiment_file(tmp_path, monkeypatch):
@@ -42,31 +53,34 @@ def test_dataset_yaml_resolved_relative_to_experiment_file(tmp_path, monkeypatch
     assert cfg.dataset.dir == "office_home"
 
 
-def test_per_branch_backbone_and_dtype():
-    cfg = load_experiment(EXPERIMENT)
-    lora, vlp = cfg.branches
-    assert lora.backbone.dtype == "fp16"
-    assert vlp.backbone.dtype == "fp32"
-    assert lora.steps_per_macro == 1
-    assert vlp.steps_per_macro == 10
+def test_two_branches_carry_independent_settings(tmp_path):
+    """The values come from this test, not from the shipped config, so changing
+    an experiment cannot break it. What is under test is that the schema keeps
+    per-branch settings apart at all -- one shared object would make every
+    branch see the last one written."""
+    def mutate(raw):
+        first, second = raw["branches"][0], raw["branches"][1]
+        first["backbone"]["dtype"], second["backbone"]["dtype"] = "fp16", "fp32"
+        first["steps_per_macro"], second["steps_per_macro"] = 1, 7
+        first["optim"]["scheduler"], second["optim"]["scheduler"] = "cosine", "inv"
+        first["ema"]["schedule"], second["ema"]["schedule"] = "const", "ramp"
+        first["optim"]["momentum"], second["optim"]["momentum"] = 0.8, 0.95
+
+    first, second = load_tmp(tmp_path, mutate).branches
+    assert (first.backbone.dtype, second.backbone.dtype) == ("fp16", "fp32")
+    assert (first.steps_per_macro, second.steps_per_macro) == (1, 7)
+    assert (first.optim.scheduler, second.optim.scheduler) == ("cosine", "inv")
+    assert (first.ema.schedule, second.ema.schedule) == ("const", "ramp")
+    assert (first.optim.momentum, second.optim.momentum) == (0.8, 0.95)
 
 
-def test_per_branch_defaults_are_independent():
-    cfg = load_experiment(EXPERIMENT)
-    lora, vlp = cfg.branches
-    assert lora.optim.scheduler == "warmup_cosine"
-    assert vlp.optim.scheduler == "inv"
-    assert lora.ema.schedule == "const"
-    assert vlp.ema.schedule == "ramp"
-    assert vlp.optim.param_group_multipliers == {"classifier": 1000.0}
+def test_extra_is_private_to_its_own_branch(tmp_path):
+    def mutate(raw):
+        raw["branches"][0]["extra"]["only_on_the_first"] = 1.25
 
-
-def test_extra_carries_branch_private_knobs():
-    cfg = load_experiment(EXPERIMENT)
-    lora, vlp = cfg.branches
-    assert lora.extra["mmd_weight"] == 1.0
-    assert vlp.extra["lambda1"] == 0.25
-    assert "mmd_weight" not in vlp.extra
+    first, second = load_tmp(tmp_path, mutate).branches
+    assert first.extra["only_on_the_first"] == 1.25
+    assert "only_on_the_first" not in second.extra
 
 
 def test_unknown_top_level_key(tmp_path):

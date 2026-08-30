@@ -26,28 +26,32 @@ def batch(seed=0, confident=True):
 
 
 def test_total_is_the_sum_of_the_reported_components():
-    out = LoraBranchLoss()(**batch())
-    assert torch.allclose(out.total, out.source_ce + out.pseudo_label + out.mmd)
+    out = LoraBranchLoss()(**batch())          # mmd_weight defaults to 1.0
+    assert torch.allclose(out.total,
+                          out.source_ce + out.pseudo_label + out.mmd)
 
 
-def test_components_are_reported_already_weighted():
-    """The implementation this replaces logged its cross term unweighted while
-    adding a weighted one to the total, so its printed parts did not sum to its
-    total. These do."""
+def test_components_are_reported_raw_and_weighted_only_in_the_total():
+    """All four terms on one scale, and each comparable with the reference's own
+    printed number -- it prints x, self, cross and mmd raw and applies the
+    weights only when summing (phpl/train_mfa_v2.py:562)."""
     data = batch()
     out = LoraBranchLoss(mmd_weight=0.25)(**data)
-    assert torch.allclose(out.mmd,
-                          0.25 * mk_mmd(data["source_features"],
-                                        data["target_features"]))
-    assert torch.allclose(out.total, out.source_ce + out.pseudo_label + out.mmd)
+    # RAW, like the other three components. The weight appears only in `total`.
+    assert torch.allclose(out.mmd, mk_mmd(data["source_features"],
+                                          data["target_features"]))
+    assert torch.allclose(out.total,
+                          out.source_ce + out.pseudo_label + 0.25 * out.mmd)
 
 
 def test_mmd_weight_scales_only_the_mmd_term():
     one = LoraBranchLoss(mmd_weight=1.0)(**batch())
     half = LoraBranchLoss(mmd_weight=0.5)(**batch())
-    assert torch.allclose(half.mmd, 0.5 * one.mmd)
+    # The reported term does not move -- it is raw. What moves is the total.
+    assert torch.allclose(half.mmd, one.mmd)
     assert torch.allclose(half.source_ce, one.source_ce)
     assert torch.allclose(half.pseudo_label, one.pseudo_label)
+    assert torch.allclose(one.total - half.total, 0.5 * one.mmd)
 
 
 def test_mmd_weight_zero_skips_the_term_entirely():

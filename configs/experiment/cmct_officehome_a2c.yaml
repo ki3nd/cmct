@@ -54,7 +54,7 @@ branches:
     strong_aug: false
   optim:
     lr: 0.0035
-    warmup_lr: 0.001
+    warmup_lr: 0.006
     momentum: 0.9
     weight_decay: 0.0005
     nesterov: false
@@ -112,7 +112,13 @@ branches:
       classifier: 1000.0
   ema:
     momentum: 0.99
-    schedule: ramp
+    # Hard-copy for the first `warmup_iters` MICRO-steps, then jump straight to
+    # `momentum` -- no ramp. This is what the run this config reproduces does
+    # (phpl/train_mfa_v2.py:513 is unconditional there; the DACS ramp is a later
+    # variant). `warmup_iters` is in branch 2's own steps, so 50 of them is 5
+    # macro-steps, NOT the 50 macro-steps of the cross-teaching warmup.
+    schedule: hard_copy_then_jump
+    warmup_iters: 50
   pseudo_label:
     threshold: 0.85
     self_reduce: mask

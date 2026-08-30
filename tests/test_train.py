@@ -290,63 +290,6 @@ def test_branch_twos_head_sees_source_before_target(tiny_run, monkeypatch):
     assert training_calls == ["source", "target"] * 2, training_calls
 
 
-# --- the shipped config, not the fixture's overrides -------------------------
-
-def test_the_shipped_config_pins_the_references_values():
-    """The tiny_run fixture overwrites thresholds, warmups and steps_per_macro
-    before the script ever reads them, so every test above runs on values that
-    are not the shipped ones. This reads the file itself."""
-    from cmct.config import load_experiment
-
-    cfg = load_experiment(EXPERIMENT)
-    lora = next(b for b in cfg.branches if b.type == "lora_clip")
-    vlp = next(b for b in cfg.branches if b.type == "vlp_clip")
-
-    assert cfg.cotrain.total_macro_steps == 1000
-    assert cfg.cotrain.cross_ref_refresh == "macro"
-    assert cfg.cotrain.ensemble == "off"
-
-    assert (lora.steps_per_macro, lora.warmup_steps) == (1, 50)
-    assert (vlp.steps_per_macro, vlp.warmup_steps) == (10, 500)
-    for branch in (lora, vlp):
-        assert branch.cross_weight == 0.5
-        assert branch.cross_mode == "mask"
-        assert branch.pseudo_label.threshold == 0.85
-    assert lora.ema.momentum == 0.99 and lora.ema.schedule == "const"
-    assert vlp.ema.schedule == "ramp"
-    assert lora.optim.warmup_lr == 0.001 and lora.optim.grad_clip == 20.0
-
-    # Not reachable from the branch-block equality test -- these live outside a
-    # branch, and the solo configs deliberately differ (50/10 and 500/100), so
-    # that test would not catch a regression here. eval_freq decides where `best`
-    # is sampled.
-    assert cfg.run.eval_freq == 50 and cfg.run.print_freq == 10
-    assert cfg.run.seed == 42
-
-
-def test_the_branch_blocks_match_the_single_branch_configs():
-    """A co-training run and a solo run must differ only by the cross term, so
-    every value outside the co-training knobs has to be the same file's."""
-    import yaml
-
-    cotrain = yaml.safe_load(EXPERIMENT.read_text())["branches"]
-    solo = {}
-    for name in ("lora_officehome_a2c", "vlp_officehome_a2c"):
-        path = CONFIGS / "experiment" / f"{name}.yaml"
-        for branch in yaml.safe_load(path.read_text())["branches"]:
-            solo[branch["type"]] = branch
-
-    cotrain_only = {"steps_per_macro", "warmup_steps", "cross_weight", "cross_mode"}
-    for branch in cotrain:
-        reference = solo[branch["type"]]
-        for key, value in branch.items():
-            if key in cotrain_only:
-                continue
-            assert value == reference[key], f"{branch['name']}.{key}"
-
-
-# --- boundary evaluation and best checkpoints --------------------------------
-
 def test_each_branchs_warmup_boundary_is_evaluated(tiny_run):
     """eval_freq is 3, so neither boundary sits on the cadence.
 

@@ -59,13 +59,18 @@ class LoraBranchLoss:
                 raise ValueError(
                     "mmd_weight > 0 needs both source_features and target_features"
                 )
-            mmd = self.mmd_weight * mk_mmd(source_features, target_features)
+            mmd = mk_mmd(source_features, target_features)
         else:
             mmd = torch.zeros((), device=source_logits.device,
                               dtype=source_logits.dtype)
 
         return LoraBranchOutput(
-            total=source_ce + pseudo + mmd,
+            # `mmd` is reported RAW and weighted only here, like the other three
+            # terms. It used to be reported pre-multiplied, so the four logged
+            # numbers were not on one scale and `mmd` did not compare with the
+            # reference's, which prints all four raw and applies the weights only
+            # when summing.
+            total=source_ce + pseudo + self.mmd_weight * mmd,
             source_ce=source_ce, pseudo_label=pseudo, mmd=mmd,
             mask_ratio=pass_fraction(reference_probabilities, self.threshold),
             reference=reference_name,

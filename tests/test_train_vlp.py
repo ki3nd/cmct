@@ -17,7 +17,9 @@ from cmct.config import load_experiment
 from cmct.engine import lr_at
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
-EXPERIMENT = CONFIGS / "experiment" / "cmct_officehome_a2c.yaml"
+# The config for the script this file tests. It used to load the co-training
+# one, so branch 2's solo tests ran against another script's settings.
+EXPERIMENT = CONFIGS / "experiment" / "vlp_officehome_a2c.yaml"
 
 
 @pytest.fixture
@@ -31,7 +33,17 @@ def tiny_run(tmp_path, class_folder_root, monkeypatch):
     raw["data"].update(root=str(class_folder_root.parent), batch_size_test=4,
                        num_workers_test=0)
     raw["branches"][0]["stream"].update(batch_size_x=4, batch_size_u=4, num_workers=0)
+    # Set here, not inherited: these tests do arithmetic on them (--max-steps 3
+    # against a total of 20), so reading them from a shipped config would turn
+    # every experiment tweak into a test failure.
     raw["cotrain"]["total_macro_steps"] = 2
+    raw["branches"][0]["steps_per_macro"] = 10
+    # Owned by the fixture, not inherited: this branch's solo tests assert the
+    # teacher moves away from the student, which only happens under a schedule
+    # whose momentum leaves 0. Reading it from a shipped config coupled them to
+    # a choice made for a different script.
+    raw["branches"][0]["ema"] = {"momentum": 0.99, "schedule": "ramp"}
+    raw["branches"][0]["steps_per_macro"] = 10
     raw["run"].update(output_dir=str(tmp_path / "out"), device="cpu",
                       print_freq=1, eval_freq=1)
 
@@ -167,7 +179,9 @@ def test_derived_values_are_saved_next_to_the_config(tiny_run):
     assert derived["ramp_max_iter"] == derived["total_steps"]
     assert derived["run_steps"] == 2
     assert derived["prompt_template"] == "an image of a {}"
-    assert derived["head_lr_multiplier"] == 1000.0
+    expected = load_experiment(config_path).branches[0].optim \
+        .param_group_multipliers["classifier"]
+    assert derived["head_lr_multiplier"] == expected
     assert derived["ema_momentum_at_0_1_last"][0] == 0.0
     assert derived["cmkd_ramp_at_0_mid_last"][0] == 0.0
     assert derived["classes"] == 3
