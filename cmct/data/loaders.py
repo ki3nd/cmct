@@ -50,6 +50,7 @@ def _build_loader(items: list[Datum], transforms: Any, batch_size: int, num_work
     if not items:
         raise ValueError("empty loader: no images to iterate over")
     dataset = ImageListDataset(items, transforms)
+    generator = None
     if train:
         generator = torch.Generator()
         generator.manual_seed(seed)
@@ -61,6 +62,13 @@ def _build_loader(items: list[Datum], transforms: Any, batch_size: int, num_work
         batch_size=batch_size,
         sampler=sampler,
         num_workers=num_workers,
+        # The SAME generator the sampler uses. Without it a rerun reshuffles
+        # identically but AUGMENTS differently: DataLoader derives each worker's
+        # base seed from `generator` when one is given and from the global RNG
+        # when it is not, and the random crop and flip run inside the worker. So
+        # `seed` used to fix the order of the images and nothing about the
+        # images themselves.
+        generator=generator if train else None,
         # Train drops a short final batch; eval keeps every image.
         drop_last=train and len(items) >= batch_size,
         pin_memory=torch.cuda.is_available(),

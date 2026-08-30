@@ -55,6 +55,23 @@ class DataConfig:
     target_domains: list[str]
     batch_size_test: int = 128
     num_workers_test: int = 8
+    underscores_in_classnames: bool = False
+    """Keep the raw directory name's underscores in the class name, and so in the
+    prompt: "alarm_clock" rather than "alarm clock". 9 of Office-Home's 65 class
+    directories have one.
+
+    False (default) replaces them with spaces. True reproduces phpl, which takes
+    dassl's class names unchanged and dassl applies only `.lower()`
+    (dassl/data/datasets/da/office_home.py:59), so its prompts carry the
+    underscore.
+
+    Measured on ViT-B/16 over 520 clipart images, prompt "a photo of a {}.":
+    68.65% with underscores against 70.58% without. The spaces are the better
+    prompt -- which is exactly why this is a knob and not a fix. Reproducing a
+    run means matching its starting point, not improving on it, and branch 1's
+    class names reach its own logits, its teacher's, the frozen zero-shot
+    reference, and the cross labels branch 2 learns from."""
+
     clarify_classnames: bool = False
     """Apply DatasetSpec.classname_overrides. Shared by every branch: giving two
     branches two different sets of class names breaks the shared label space."""
