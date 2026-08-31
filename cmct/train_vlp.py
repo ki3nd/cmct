@@ -175,7 +175,7 @@ def main(argv: list[str] | None = None) -> float:
     print("-" * 78, flush=True)
     (output_dir / "run.json").write_text(json.dumps(derived, indent=2) + "\n")
 
-    stream = BatchSource(split, cfg.dataset, branch, cfg.run.seed)
+    stream = BatchSource(split, cfg.dataset, branch)
     test_loader = build_test_loader(split, cfg.dataset, cfg.data)
 
     model = VlpModel(

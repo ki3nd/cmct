@@ -227,7 +227,7 @@ def main(argv: list[str] | None = None) -> dict[str, float]:
     memory("branch 1 built", debug)
     vlp = build_vlp(cfg, vlp_cfg, split, device)
     memory("branch 2 built", debug)
-    streams = {b["name"]: BatchSource(split, cfg.dataset, b["config"], cfg.run.seed)
+    streams = {b["name"]: BatchSource(split, cfg.dataset, b["config"])
                for b in (lora, vlp)}
     test_loader = build_test_loader(split, cfg.dataset, cfg.data)
 

@@ -23,7 +23,6 @@ from cmct.data import (
     build_test,
     build_test_loader,
     build_train,
-    stream_seed,
 )
 from cmct.data.dataset import read_image
 
@@ -226,7 +225,7 @@ def test_train_drops_short_final_batch_and_test_keeps_it(class_folder_root):
         stream=dataclasses.replace(cfg.branches[0].stream, batch_size_x=5, batch_size_u=5,
                                    num_workers=0),
     )
-    source = BatchSource(split, cfg.dataset, cfg.branches[0], cfg.run.seed)
+    source = BatchSource(split, cfg.dataset, cfg.branches[0])
     assert len(split.train_x) == 12
     assert len(source.source.loader) == 2                    # 12 // 5, the short batch is dropped
 
@@ -246,7 +245,7 @@ def test_batch_larger_than_dataset_disables_drop_last(class_folder_root):
         stream=dataclasses.replace(cfg.branches[0].stream, batch_size_x=999, batch_size_u=999,
                                    num_workers=0),
     )
-    source = BatchSource(split, cfg.dataset, branch, cfg.run.seed)
+    source = BatchSource(split, cfg.dataset, branch)
     assert len(source.source.loader) == 1
     assert source.source.loader.drop_last is False
 
@@ -260,7 +259,7 @@ def test_empty_loader_raises(class_folder_root):
         stream=dataclasses.replace(cfg.branches[0].stream, num_workers=0),
     )
     with pytest.raises(ValueError, match="empty loader"):
-        BatchSource(split, cfg.dataset, branch, cfg.run.seed)
+        BatchSource(split, cfg.dataset, branch)
 
 
 def test_test_loader_order_is_deterministic(class_folder_root):
@@ -283,13 +282,23 @@ def test_strong_aug_raises_instead_of_silently_doing_nothing(class_folder_root):
         stream=dataclasses.replace(cfg.branches[0].stream, strong_aug=True, num_workers=0),
     )
     with pytest.raises(NotImplementedError, match="strong_aug"):
-        BatchSource(split, cfg.dataset, cfg.branches[0], cfg.run.seed)
+        BatchSource(split, cfg.dataset, cfg.branches[0])
 
 
-# --- streams: independent and reproducible -----------------------------------
+# --- streams: shuffle comes from the shared global RNG, like dassl's own -----
+#
+# There is no per-branch seed any more (see loaders.py's docstring): a stream's
+# shuffle is whatever the global RNG produces at the point it is built, exactly
+# like dassl's RandomSampler(data_source). These tests seed that global RNG
+# explicitly (torch.manual_seed), the way train_lora.set_seed does once per
+# real run, and check the property that actually holds now: two streams differ
+# because they are built at different points in the stream, and rebuilding from
+# the same point reproduces -- but WHICH point a branch lands on depends on how
+# many draws happened first, i.e. on build order. That is a deliberate trade
+# for matching train_mfa_v2.py's real behaviour, not an oversight.
 
 def order_of(split, cfg, branch, take=12):
-    src = BatchSource(split, cfg.dataset, branch, cfg.run.seed)
+    src = BatchSource(split, cfg.dataset, branch)
     out = []
     while len(out) < take:
         out.extend(src.source.next()["index"].tolist())
@@ -307,32 +316,46 @@ def small_branch(cfg, index, name=None):
 def test_two_branches_get_different_order(class_folder_root):
     cfg = cfg_for(class_folder_root)
     split = build_split(cfg.dataset, cfg.data)
+    torch.manual_seed(0)
     a = order_of(split, cfg, small_branch(cfg, 0))
     b = order_of(split, cfg, small_branch(cfg, 1))
     assert a != b
 
 
-def test_same_branch_same_seed_reproduces_regardless_of_build_order(class_folder_root):
+def test_same_seed_and_build_order_reproduces(class_folder_root):
     cfg = cfg_for(class_folder_root)
     split = build_split(cfg.dataset, cfg.data)
+    torch.manual_seed(0)
     first = order_of(split, cfg, small_branch(cfg, 0))
-    _ = order_of(split, cfg, small_branch(cfg, 1))          # build another branch in between
+    torch.manual_seed(0)
     again = order_of(split, cfg, small_branch(cfg, 0))
     assert first == again
 
 
+def test_build_order_changes_the_stream(class_folder_root):
+    """Unlike a per-branch-seeded generator, a branch's shuffle now depends on
+    how many global-RNG draws happened before it was built -- matching
+    train_mfa_v2.py's dm1/dm2 (dassl.RandomSampler(data_source), no generator=),
+    where the SAME branch built second gets a different shuffle than built
+    first. This is the trade this design makes; see loaders.py's docstring."""
+    cfg = cfg_for(class_folder_root)
+    split = build_split(cfg.dataset, cfg.data)
+    torch.manual_seed(0)
+    built_first = order_of(split, cfg, small_branch(cfg, 0))
+    torch.manual_seed(0)
+    order_of(split, cfg, small_branch(cfg, 1))              # consumes RNG draws first
+    built_second = order_of(split, cfg, small_branch(cfg, 0))
+    assert built_first != built_second
+
+
 def test_source_and_target_streams_differ(class_folder_root):
     cfg = cfg_for(class_folder_root)
-    seed = cfg.run.seed
-    assert stream_seed(seed, "lora", "source") != stream_seed(seed, "lora", "target")
-
-
-def test_stream_seed_is_stable_across_processes():
-    """sha256, not hash(): hash() on a str is salted per process, so a run would
-    not reproduce tomorrow."""
-    assert stream_seed(42, "lora", "source") == stream_seed(42, "lora", "source")
-    assert stream_seed(42, "lora", "source") != stream_seed(42, "vlp", "source")
-    assert stream_seed(42, "lora", "source") != stream_seed(43, "lora", "source")
+    split = build_split(cfg.dataset, cfg.data)
+    torch.manual_seed(0)
+    src = BatchSource(split, cfg.dataset, small_branch(cfg, 0))
+    source_order = src.source.next()["index"].tolist()
+    target_order = src.target.next()["index"].tolist()
+    assert source_order != target_order
 
 
 def test_infinite_stream_never_exhausts(class_folder_root):
@@ -350,7 +373,7 @@ def test_infinite_stream_never_exhausts(class_folder_root):
 def test_batch_shape_and_strong_view_absent(class_folder_root):
     cfg = cfg_for(class_folder_root)
     split = build_split(cfg.dataset, cfg.data)
-    src = BatchSource(split, cfg.dataset, small_branch(cfg, 0), cfg.run.seed)
+    src = BatchSource(split, cfg.dataset, small_branch(cfg, 0))
     batch = src.next()
     assert batch.img_x.shape == (4, 3, 224, 224)
     assert batch.label_x.shape == (4,)
