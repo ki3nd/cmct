@@ -264,3 +264,25 @@ If you are replacing `CMKD` with a different self-training loss:
   `--trace-out`, and diff the two traces. Any drift outside the loss values
   you intentionally changed indicates the swap touched something it
   shouldn't have.
+
+## Swapping the backbone
+
+The branches name their backbones separately (`branch_lora.backbone`,
+`branch_mlp.backbone`) because they are not interchangeable. `branch_lora` is
+tied to ViT: LoRA is injected into attention blocks and the position table
+covers ViT only. `branch_mlp` is not tied to anything -- it reads features
+through `encode_image` and derives its head width from the backbone -- so any
+CLIP backbone works there.
+
+What a non-CLIP backbone would break is the loss, not the plumbing. CMKD is
+cross-modal: it distils between the learned head and the backbone's own
+image-text cosine head. `reg_loss` reads the live cosine branch, its source
+term is a cross-entropy on cosine logits, and `coe` and `mix` compare the head
+against the cosine branch. A backbone with no text tower has no cosine branch,
+so all three terms are undefined -- a plain torchvision ResNet needs a
+replacement self-loss that uses only the head's own predictions. CLIP's own
+ResNets (RN50, RN101) have text towers and need no such change; CLIP has no
+RN18, its smallest ResNet being RN50.
+
+Cross-teaching and the EMA teacher are independent of that choice: both need
+only the head's `target_logits`, so they survive a loss swap untouched.

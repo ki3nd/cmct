@@ -47,9 +47,6 @@ from vendor.dassl.utils import mkdir_if_missing, set_random_seed
 # not be conflated.
 LORA_PROMPT_TEMPLATE = "a photo of a {}."
 
-# TransferNet's backbone name, independent of backbone.name (which only
-# configures branch_lora's CLIP backbone).
-CMKD_MODEL_NAME = "VIT-B"
 
 
 def ema_momentum_at(step: int, momentum: float, schedule: str, hard_copy_iters: int) -> float:
@@ -75,7 +72,7 @@ def build_lora_pair(config: Config, classnames, device):
     Supports ViT backbones only.
     """
     lora_kwargs = {
-        "backbone_name": config.backbone.name,
+        "backbone_name": config.branch_lora.backbone.name,
         "position": config.branch_lora.lora.position,
         "params": config.branch_lora.lora.params,
         "r": config.branch_lora.lora.r,
@@ -84,8 +81,8 @@ def build_lora_pair(config: Config, classnames, device):
         "rank_ramp": config.branch_lora.lora.rank_ramp,
     }
 
-    clip_student = load_clip_to_cpu(config.backbone.name, config.backbone.path)
-    clip_teacher = load_clip_to_cpu(config.backbone.name, config.backbone.path)
+    clip_student = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)
+    clip_teacher = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)
     if config.branch_lora.precision == "fp32":
         clip_student.float()
         clip_teacher.float()
@@ -209,7 +206,7 @@ def main():
     print("Building the CMKD branch's TransferNet")
     model_mlp = TransferNet(
         prompts_for(config.data.name),
-        model_name=CMKD_MODEL_NAME,
+        model_name=config.branch_mlp.backbone.name,
         num_classes=num_classes,
         label_smoothing=config.branch_mlp.label_smoothing,
         lambdas=config.branch_mlp.lambdas,
@@ -263,7 +260,7 @@ def main():
         sched_lora = torch.optim.lr_scheduler.CosineAnnealingLR(optim_lora, T_max=lora_post_warmup)
 
         print("Building the frozen zero-shot CLIP (used only during the LoRA branch's warmup)")
-        clip_frozen = load_clip_to_cpu(config.backbone.name, config.backbone.path)
+        clip_frozen = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)
         if config.branch_lora.precision == "fp32":
             clip_frozen.float()
         teacher_frozen = FrozenTeacherCLIP(classnames, clip_frozen, LORA_PROMPT_TEMPLATE).to(device)

@@ -33,15 +33,17 @@ def prompts_for(dataset_name):
 class ClipBackbone(nn.Module):
     def __init__(self, prompts, model_name):
         super(ClipBackbone, self).__init__()
-        if model_name == "RN50":
-            model, preprocess = clip.load("RN50", device="cuda")
-            self.output_num = 1024
-        elif model_name == "RN101":
-            model, preprocess = clip.load("RN101", device="cuda")
-            self.output_num = 512
-        elif model_name == "VIT-B":
-            model, preprocess = clip.load("ViT-B/16", device="cuda")
-            self.output_num = 512
+        # `model_name` is a CLIP checkpoint name, and any CLIP backbone works:
+        # this branch only ever reads features through `encode_image`, so there
+        # is no architecture-specific plumbing to keep in step.
+        model, _preprocess = clip.load(model_name, device="cuda")
+        # The classifier head's input width, taken from the backbone rather than
+        # tabulated per checkpoint, so adding one needs no edit here. This is
+        # `encode_image`'s output width -- the joint image-text embedding, after
+        # the projection -- which is what `forward_features` returns and what
+        # `forward_head` has to match against the text embedding. 512 for
+        # ViT-B/16 and RN101, 1024 for RN50.
+        self.output_num = model.visual.output_dim
         # This branch's backbone must be fp32, and getting that wrong is a
         # silent-until-it-crashes hazard. `cmct.clip`'s `build_model` downcasts
         # the model to fp16 (see `convert_weights` in `cmct/clip/model.py`),

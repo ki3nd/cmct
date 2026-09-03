@@ -12,6 +12,9 @@ def test_shipped_config_parses_to_the_documented_effective_values():
     cfg = Config.from_yaml(CONFIG_PATH)
     assert cfg.seed == 42
     assert cfg.branch_lora.precision == "fp16"
+    assert cfg.branch_lora.backbone.name == "ViT-B/16"
+    assert cfg.branch_lora.backbone.path == "./assets"
+    assert cfg.branch_mlp.backbone.name == "ViT-B/16"
     assert cfg.pseudo_label.threshold == 0.85
     assert cfg.branch_lora.lora.r == 2
     assert cfg.branch_lora.lora.rank_ramp == [2, 4, 6, 8, 10]
@@ -103,3 +106,26 @@ def test_missing_key_is_rejected_by_full_dotted_path(tmp_path):
                  .replace("schedule: dacs, ", ""))
     with pytest.raises(ValueError, match=r"branch_mlp\.ema\.schedule"):
         Config.from_yaml(str(p))
+
+
+def test_a_non_vit_backbone_is_rejected_for_the_lora_branch(tmp_path):
+    """LoRA is injected into ViT attention blocks and the injection table covers
+    ViT only, so a ResNet here has to fail at parse time rather than as a bare
+    KeyError deep inside apply_lora."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace(
+        "    name: ViT-B/16          # must be a ViT", "    name: RN50          # must be a ViT"))
+    with pytest.raises(ValueError, match=r"branch_lora\.backbone\.name"):
+        Config.from_yaml(str(p))
+
+
+def test_the_mlp_branch_accepts_a_resnet_backbone(tmp_path):
+    """The MLP branch reads features through encode_image only, so any CLIP
+    backbone is usable there -- including the ResNets, whose BatchNorm fix_bn
+    then freezes."""
+    p = tmp_path / "rn50.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace(
+        "    name: ViT-B/16          # any CLIP backbone", "    name: RN50          # any CLIP backbone"))
+    cfg = Config.from_yaml(str(p))
+    assert cfg.branch_mlp.backbone.name == "RN50"
+    assert cfg.branch_lora.backbone.name == "ViT-B/16"

@@ -18,6 +18,12 @@ from vendor.dassl.config import get_cfg_default
 # hardcoded prompt lists for officehome, office31, visda17 and domainnet only,
 # so accepting "minidomainnet" here would only defer a KeyError to deep inside
 # model construction. Rejecting it at config-parse time is strictly better.
+LORA_BACKBONES = ("ViT-B/16", "ViT-B/32", "ViT-L/14")
+"""Kept in step with branch_lora/lora/apply.py's INDEX_POSITIONS_VISION."""
+
+MLP_BACKBONES = ("ViT-B/16", "RN50", "RN101")
+"""Kept in step with branch_mlp/backbone.py's checkpoint map."""
+
 DATASET_NAMES = {
     "officehome": "OfficeHome",
     "office31": "Office31",
@@ -63,9 +69,33 @@ class TrainConfig:
 
 
 @dataclass(frozen=True)
-class BackboneConfig:
+class LoraBackboneConfig:
     name: str
+    """A CLIP checkpoint name. Must be one of the ViT backbones: LoRA is injected
+    into the vision transformer's attention blocks, and the injection table only
+    covers ViT (branch_lora/lora/apply.py's INDEX_POSITIONS_VISION)."""
     path: str
+    """Where this branch downloads its checkpoint to."""
+
+
+@dataclass(frozen=True)
+class MlpBackboneConfig:
+    name: str
+    """A CLIP checkpoint name. Any CLIP backbone works here -- the branch reads
+    features through `encode_image` and needs no architecture-specific plumbing,
+    and the classifier head's width is derived from whatever the backbone emits.
+
+    Choosing a ResNet has one consequence worth knowing: `fix_bn` in
+    branch_mlp/model.py puts every BatchNorm in the backbone into eval at the
+    start of each forward, so the backbone's BN keeps its pretrained running
+    statistics and never adapts to the target domain. A ViT has no BatchNorm, so
+    that line is inert there and live on a ResNet. It is deliberate -- freezing
+    BN is standard when fine-tuning a pretrained backbone on a small, shifted
+    target set -- and it belongs to the fine-tuning setup rather than to the
+    CMKD loss, so it should survive a loss swap.
+
+    This branch downloads through CLIP's own loader, which caches in
+    ~/.cache/clip; it has no path setting of its own."""
 
 
 @dataclass(frozen=True)
@@ -87,6 +117,7 @@ class WarmupConfig:
 @dataclass(frozen=True)
 class BranchLoraConfig:
     enabled: bool
+    backbone: LoraBackboneConfig
     # fp16 or fp32, and it governs THIS BRANCH ONLY. branch_mlp's backbone is
     # always fp32 and is not configurable -- its `.float()` call in
     # branch_mlp/backbone.py restores fp32 explicitly after cmct.clip's
@@ -120,6 +151,7 @@ class TeacherEmaConfig:
 
 @dataclass(frozen=True)
 class BranchMlpConfig:
+    backbone: MlpBackboneConfig
     lr: float
     classifier_lr_mult: float
     lr_gamma: float
@@ -156,7 +188,6 @@ class Config:
     output_dir: str
     data: DataConfig
     train: TrainConfig
-    backbone: BackboneConfig
     branch_lora: BranchLoraConfig
     branch_mlp: BranchMlpConfig
     pseudo_label: PseudoLabelConfig
@@ -201,6 +232,19 @@ def _build(cls, raw: Any, path: str):
 
 
 def _validate(cfg: Config) -> None:
+    if cfg.branch_lora.backbone.name not in LORA_BACKBONES:
+        # Without this the run dies much later, inside apply_lora, with a bare
+        # KeyError about a "vision position".
+        raise ValueError(
+            f"branch_lora.backbone.name must be one of {sorted(LORA_BACKBONES)} "
+            f"(LoRA is injected into ViT attention blocks), got "
+            f"{cfg.branch_lora.backbone.name!r}"
+        )
+    if cfg.branch_mlp.backbone.name not in MLP_BACKBONES:
+        raise ValueError(
+            f"branch_mlp.backbone.name must be one of {sorted(MLP_BACKBONES)}, got "
+            f"{cfg.branch_mlp.backbone.name!r}"
+        )
     if cfg.branch_lora.precision not in ("fp16", "fp32"):
         raise ValueError(
             f"branch_lora.precision must be fp16 or fp32, got {cfg.branch_lora.precision!r}"

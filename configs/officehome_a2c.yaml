@@ -20,12 +20,12 @@ train:
   print_freq: 10
   eval_freq: 50
 
-backbone:
-  name: ViT-B/16
-  path: ./assets
 
 branch_lora:
   enabled: true
+  backbone:
+    name: ViT-B/16          # must be a ViT: LoRA is injected into ViT attention
+    path: ./assets          # this branch's download location
   precision: fp16           # fp16 | fp32 -- THIS BRANCH ONLY; branch_mlp is always fp32
   lora:
     position: all
@@ -44,6 +44,9 @@ branch_lora:
   ema_momentum: 0.99
 
 branch_mlp:
+  backbone:
+    name: ViT-B/16          # any CLIP backbone; RN50/RN101 also work, and on a
+                            # ResNet fix_bn freezes the backbone's BatchNorm
   lr: 3.0e-6
   classifier_lr_mult: 1000
   lr_gamma: 0.0003

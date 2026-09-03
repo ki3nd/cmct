@@ -57,6 +57,28 @@ downloaded, fails there with a clear message rather than silently mislabelling
 
 ## Backbone weights
 
+Each branch names its own backbone, and they are independent:
+
+- `branch_lora.backbone.name` must be a ViT (`ViT-B/16`, `ViT-B/32`,
+  `ViT-L/14`). LoRA is injected into the vision transformer's attention blocks
+  and the injection table covers ViT only, so a ResNet here is rejected at
+  parse time.
+- `branch_mlp.backbone.name` accepts any CLIP backbone (`ViT-B/16`, `RN50`,
+  `RN101`). That branch reads features through `encode_image` alone, and the
+  classifier head's width is derived from the backbone rather than tabulated,
+  so nothing else needs changing: 512 for ViT-B/16 and RN101, 1024 for RN50.
+
+Choosing a ResNet for `branch_mlp` wakes a line that is inert on a ViT:
+`fix_bn` puts every BatchNorm in the backbone into eval at the start of each
+forward, so the backbone keeps its pretrained running statistics and never
+adapts to the target domain. CLIP's RN50 visual tower has 55 BatchNorm modules;
+ViT-B/16 has none. This is deliberate -- freezing BN is standard when
+fine-tuning a pretrained backbone on a small, shifted target set -- and it
+belongs to the fine-tuning setup rather than to the CMKD loss, so it should
+survive a loss swap. Note also that `branch_mlp.lr` was tuned for ViT
+fine-tuning; a ResNet wants its own value, so a first ResNet run being worse
+does not by itself say the backbone is worse.
+
 The two branches fetch CLIP ViT-B/16 independently, to two different places,
 and a fresh run downloads it twice:
 
