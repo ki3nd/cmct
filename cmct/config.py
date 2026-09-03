@@ -12,6 +12,7 @@ from typing import Any, get_type_hints
 
 import yaml
 
+from cmct.losses import DIVERSITY_LOSSES
 from vendor.dassl.config import get_cfg_default
 
 # miniDomainNet is deliberately excluded: cmct/branch_mlp/backbone.py carries
@@ -115,6 +116,20 @@ class WarmupConfig:
 
 
 @dataclass(frozen=True)
+class DiversityConfig:
+    """Diversity/confidence regulariser on `branch_lora`'s TARGET predictions.
+
+    `branch_lora`'s four other terms (source CE, self and cross masked
+    pseudo-label CE, MK-MMD) all push predictions to be sharper; none of them
+    stops the branch collapsing onto a subset of classes. `weight: 0.0` leaves
+    the branch exactly as it was, which is the shipped default so that `main`
+    keeps reproducing the reference loss trace.
+    """
+    kind: str
+    weight: float
+
+
+@dataclass(frozen=True)
 class BranchLoraConfig:
     enabled: bool
     backbone: LoraBackboneConfig
@@ -133,6 +148,7 @@ class BranchLoraConfig:
     mmd_weight: float
     cross_weight: float
     ema_momentum: float
+    diversity: DiversityConfig
 
 
 @dataclass(frozen=True)
@@ -245,6 +261,13 @@ def _validate(cfg: Config) -> None:
             f"branch_mlp.backbone.name must be one of {sorted(MLP_BACKBONES)}, got "
             f"{cfg.branch_mlp.backbone.name!r}"
         )
+    if cfg.branch_lora.diversity.kind not in DIVERSITY_LOSSES:
+        raise ValueError(
+            f"branch_lora.diversity.kind must be one of "
+            f"{sorted(DIVERSITY_LOSSES)}, got {cfg.branch_lora.diversity.kind!r}"
+        )
+    if cfg.branch_lora.diversity.weight < 0.0:
+        raise ValueError("branch_lora.diversity.weight must be non-negative")
     if cfg.branch_lora.precision not in ("fp16", "fp32"):
         raise ValueError(
             f"branch_lora.precision must be fp16 or fp32, got {cfg.branch_lora.precision!r}"

@@ -1,7 +1,7 @@
 
 import torch
 
-from cmct.losses import DebiasTracker, masked_cross_entropy, mk_mmd
+from cmct.losses import DebiasTracker, diversity_loss, masked_cross_entropy, mk_mmd
 from tests.conftest import load_fixture
 
 
@@ -58,3 +58,26 @@ def test_debias_tracker_corrects_before_updating_qhat():
     # different, because qhat moved between the two calls.
     second = tracker.correct(logits)
     assert not torch.equal(first, second)
+
+
+def test_diversity_terms_punish_collapsing_onto_one_class():
+    # The ONE property both terms exist for. `branch_lora` has no other
+    # defence against predicting a single class for the whole batch, and
+    # plain confidence maximisation would score these two IDENTICALLY --
+    # both batches are equally confident. Removing the class-balancing
+    # (the `/ column_mass` in balanced_gini, the marginal-entropy half of
+    # information_maximization) makes this test fail.
+    spread = torch.eye(3) * 20.0            # confident, one class each
+    collapsed = torch.zeros(3, 3)
+    collapsed[:, 0] = 20.0                  # equally confident, all one class
+
+    for kind in ("im", "gini"):
+        assert diversity_loss(collapsed, kind).item() > diversity_loss(spread, kind).item() + 0.5, kind
+
+
+def test_diversity_terms_stay_finite_at_fp16():
+    # branch_lora runs fp16 and its logit_scale (~100) drives softmax to
+    # near-one-hot, so log(p) underflows unless the terms cast to fp32.
+    logits = (torch.eye(4) * 100.0).half()
+    for kind in ("im", "gini"):
+        assert torch.isfinite(diversity_loss(logits, kind)), kind

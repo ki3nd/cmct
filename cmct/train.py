@@ -38,7 +38,7 @@ from cmct.branch_mlp import TransferNet, ema_update_teacher, prompts_for
 from cmct.config import Config, resolve, to_dassl_cfg
 from cmct.data import CyclingLoader, build_data_manager
 from cmct.evaluate import evaluate
-from cmct.losses import DebiasTracker, masked_cross_entropy, mk_mmd
+from cmct.losses import DebiasTracker, diversity_loss, masked_cross_entropy, mk_mmd
 from vendor.dassl.utils import mkdir_if_missing, set_random_seed
 
 # The LoRA branch's prompt: every dataset this entry point supports maps to
@@ -271,6 +271,8 @@ def main():
         teacher_frozen = None
 
     confi = config.pseudo_label.threshold
+    div_weight = config.branch_lora.diversity.weight
+    div_kind = config.branch_lora.diversity.kind
     best_acc_lora, best_acc_mlp, best_acc_ens = 0.0, 0.0, 0.0
 
     # pseudo_label.debias: two INDEPENDENT trackers, one per branch. The LoRA
@@ -445,15 +447,28 @@ def main():
             # MK-MMD is meant to measure. Cheap for a LoRA student, so just an
             # extra forward call rather than reusing the self/cross forward's
             # own feature.
-            _, feat_u_lora_weak = student_lora(image_u_lora)
+            logits_u_lora_weak, feat_u_lora_weak = student_lora(image_u_lora)
             loss_mmd_lora = mk_mmd(feat_x_lora, feat_u_lora_weak)
+            # Diversity term on the WEAK view, reusing the forward pass above
+            # rather than paying for another one. Weak rather than strong
+            # because this term reads the batch's class marginal, and a strong
+            # augmentation's prediction is a noisier estimate of it. Skipped
+            # entirely at weight 0.0 so the default run is untouched.
+            if div_weight > 0.0:
+                loss_div_lora = diversity_loss(logits_u_lora_weak, div_kind)
+            else:
+                loss_div_lora = torch.tensor(0.0, device=device)
             # The self and cross losses use the STRONG view instead.
             logits_u_lora, _ = student_lora(image_u_lora_strong)
 
             if in_warmup_lora:
                 loss_u_lora_self = masked_cross_entropy(logits_u_lora, prob_cross_for_lora, confi)
                 loss_u_lora_cross = torch.tensor(0.0, device=device)
-                loss_lora = loss_x_lora + loss_u_lora_self + config.branch_lora.mmd_weight * loss_mmd_lora
+                loss_lora = (
+                    loss_x_lora + loss_u_lora_self
+                    + config.branch_lora.mmd_weight * loss_mmd_lora
+                    + div_weight * loss_div_lora
+                )
             else:
                 with torch.no_grad():
                     logits_teacher_lora_self, _ = teacher_lora(image_u_lora)
@@ -466,6 +481,7 @@ def main():
                     loss_x_lora + loss_u_lora_self
                     + config.branch_lora.cross_weight * loss_u_lora_cross
                     + config.branch_lora.mmd_weight * loss_mmd_lora
+                    + div_weight * loss_div_lora
                 )
 
             if in_warmup_lora:
@@ -493,7 +509,8 @@ def main():
                 print(
                     f"macro [{macro + 1}/{config.train.iters}] (cmkd step {mlp_step_global}/{mlp_total_iters}) "
                     f"loss_lora {loss_lora.item():.4f} (x {loss_x_lora.item():.4f} self {loss_u_lora_self.item():.4f} "
-                    f"cross {loss_u_lora_cross.item():.4f} mmd {loss_mmd_lora.item():.4f}) acc_x_lora {acc_x_lora:.2f} | "
+                    f"cross {loss_u_lora_cross.item():.4f} mmd {loss_mmd_lora.item():.4f} "
+                    f"div {loss_div_lora.item():.4f}) acc_x_lora {acc_x_lora:.2f} | "
                     f"loss_mlp {loss_mlp.item():.4f} (clf {clf_loss.item():.4f} transfer {transfer_loss.item():.4f} "
                     f"cross {loss_mlp_cross.item():.4f}) acc_x_mlp {acc_x_mlp:.2f}"
                 )
@@ -568,6 +585,7 @@ def main():
                 "loss_self": loss_u_lora_self.item() if lora_enabled else None,
                 "loss_cross": loss_u_lora_cross.item() if lora_enabled else None,
                 "loss_mmd": loss_mmd_lora.item() if lora_enabled else None,
+                "loss_div": loss_div_lora.item() if lora_enabled else None,
                 "loss_mlp": loss_mlp.item(),
                 "clf_loss": clf_loss.item(), "transfer_loss": transfer_loss.item(),
                 "loss_mlp_cross": loss_mlp_cross.item(),

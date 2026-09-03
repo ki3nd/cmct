@@ -42,6 +42,14 @@ branch_lora:
   mmd_weight: 1.0
   cross_weight: 0.5
   ema_momentum: 0.99
+  # Diversity regulariser on this branch's TARGET predictions. Every other
+  # branch_lora term sharpens predictions; none prevents collapse onto a
+  # subset of classes. weight 0.0 == off, which keeps the reference loss
+  # trace intact. Start around 0.1-1.0 to turn it on.
+  #   kind: gini -> class-balanced Gini (survives this branch's near-one-hot
+  #                 softmax; the recommended one here)
+  #   kind: im   -> DINE's information maximisation
+  diversity: {kind: gini, weight: 0.0}
 
 branch_mlp:
   backbone:
