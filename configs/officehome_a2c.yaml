@@ -1,0 +1,64 @@
+seed: 42
+gpu: 0
+output_dir: output/cmct/officehome/a2c
+
+data:
+  root: /kaggle/working/data
+  name: officehome
+  source: [art]
+  target: [clipart]
+  image_size: 224
+  pixel_mean: [0.48145466, 0.4578275, 0.40821073]
+  pixel_std:  [0.26862954, 0.26130258, 0.27577711]
+  batch_size: {source: 32, target: 32, test: 128}
+  num_workers: 8
+  strong_aug: false
+
+train:
+  iters: 1000                 # macro-steps; one LoRA-branch update each
+  mlp_steps_per_iter: 10
+  print_freq: 10
+  eval_freq: 50
+
+backbone:
+  name: ViT-B/16
+  path: ./assets
+
+branch_lora:
+  enabled: true
+  precision: fp16           # fp16 | fp32 -- THIS BRANCH ONLY; branch_mlp is always fp32
+  lora:
+    position: all
+    params: [q, k, v]
+    r: 2
+    alpha: 1
+    dropout: 0.25
+    rank_ramp: [2, 4, 6, 8, 10]
+  lr: 0.0035
+  warmup: {lr: 0.006, iters: 50}
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  grad_clip: 20.0
+  mmd_weight: 1.0
+  cross_weight: 0.5
+  ema_momentum: 0.99
+
+branch_mlp:
+  lr: 3.0e-6
+  classifier_lr_mult: 1000
+  lr_gamma: 0.0003
+  lr_decay: 0.75
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  nesterov: true
+  label_smoothing: 0.1
+  lambdas: {task: 0.25, source_ce: 0.1, target_gini: 0.025}
+  lamb_gamma: 1.0
+  warmup_iters: 500
+  cross_weight: 0.5
+  self_from_teacher: true
+  ema: {momentum: 0.99, schedule: dacs, hard_copy_iters: 100}
+
+pseudo_label:
+  threshold: 0.85             # CONFI, shared by both branches
+  debias: {enabled: false, tau: 0.5, momentum: 0.99}

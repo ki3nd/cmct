@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.pt
+.venv/
+.ruff_cache/
+.pytest_cache/
+output/
+assets/
+traces/
+.superpowers/
