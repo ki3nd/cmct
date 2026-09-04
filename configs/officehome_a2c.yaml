@@ -44,6 +44,7 @@ branch_lora:
   ema_momentum: 0.99
 
 branch_mlp:
+  enabled: true
   backbone:
     name: ViT-B/16          # any CLIP backbone; RN50/RN101 also work, and on a
                             # ResNet fix_bn freezes the backbone's BatchNorm

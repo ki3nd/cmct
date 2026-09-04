@@ -151,6 +151,7 @@ class TeacherEmaConfig:
 
 @dataclass(frozen=True)
 class BranchMlpConfig:
+    enabled: bool
     backbone: MlpBackboneConfig
     lr: float
     classifier_lr_mult: float
@@ -232,6 +233,11 @@ def _build(cls, raw: Any, path: str):
 
 
 def _validate(cfg: Config) -> None:
+    if not cfg.branch_lora.enabled and not cfg.branch_mlp.enabled:
+        raise ValueError(
+            "branch_lora.enabled and branch_mlp.enabled are both false: there is "
+            "nothing left to train"
+        )
     if cfg.branch_lora.backbone.name not in LORA_BACKBONES:
         # Without this the run dies much later, inside apply_lora, with a bare
         # KeyError about a "vision position".
@@ -276,13 +282,18 @@ def _validate(cfg: Config) -> None:
 def resolve(config: Config) -> Config:
     """Apply cross-field consequences after validation, returning a new frozen Config.
 
-    Today's only consequence: with no LoRA teacher (branch_lora.enabled is
-    False) there is nothing for branch_mlp to cross-teach from, so
-    branch_mlp.cross_weight is forced to 0.0.
+    Today's only consequence runs in both directions: a disabled branch is not
+    there to be cross-taught FROM, so the other branch's cross_weight is forced
+    to 0.0. Doing it here rather than in train.py keeps the resolved Config the
+    single honest record of what a run actually used -- the printed config and
+    the trace both show 0.0 instead of a weight that was quietly ignored.
     """
     if not config.branch_lora.enabled and config.branch_mlp.cross_weight != 0.0:
-        new_cmkd = dataclasses.replace(config.branch_mlp, cross_weight=0.0)
-        config = dataclasses.replace(config, branch_mlp=new_cmkd)
+        new_mlp = dataclasses.replace(config.branch_mlp, cross_weight=0.0)
+        config = dataclasses.replace(config, branch_mlp=new_mlp)
+    if not config.branch_mlp.enabled and config.branch_lora.cross_weight != 0.0:
+        new_lora = dataclasses.replace(config.branch_lora, cross_weight=0.0)
+        config = dataclasses.replace(config, branch_lora=new_lora)
     return config
 
 

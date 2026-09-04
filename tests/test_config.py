@@ -129,3 +129,29 @@ def test_the_mlp_branch_accepts_a_resnet_backbone(tmp_path):
     cfg = Config.from_yaml(str(p))
     assert cfg.branch_mlp.backbone.name == "RN50"
     assert cfg.branch_lora.backbone.name == "ViT-B/16"
+
+
+def test_resolve_forces_cross_weight_to_zero_when_branch_mlp_disabled(tmp_path):
+    """The mirror of the branch_lora case: with no CMKD teacher there is nothing
+    for branch_lora to cross-teach from."""
+    from cmct.config import resolve
+
+    p = tmp_path / "lora_only.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace(
+        "branch_mlp:\n  enabled: true", "branch_mlp:\n  enabled: false"))
+    cfg = Config.from_yaml(str(p))
+    assert cfg.branch_lora.cross_weight == 0.5  # unresolved value, unchanged by parsing
+
+    resolved = resolve(cfg)
+    assert resolved.branch_lora.cross_weight == 0.0
+    assert resolved.branch_lora.enabled is True
+    assert resolved.branch_mlp.cross_weight == 0.5  # the disabled branch is left alone
+
+
+def test_disabling_both_branches_is_rejected(tmp_path):
+    """Neither branch left to train is a config mistake, not a valid ablation:
+    it would otherwise run the full macro-step loop doing nothing."""
+    p = tmp_path / "neither.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("enabled: true", "enabled: false"))
+    with pytest.raises(ValueError, match="nothing left to train"):
+        Config.from_yaml(str(p))
