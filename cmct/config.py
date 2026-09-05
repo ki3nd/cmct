@@ -166,7 +166,11 @@ class BranchMlpConfig:
     lamb_gamma: float
     warmup_iters: int
     cross_weight: float
-    self_from_teacher: bool
+    self_reference: str
+    """What CMKD's coe and mix terms compare the MLP head against: "own_clip"
+    (this branch's live cosine head), "own_teacher" (its EMA teacher's), or
+    "lora_teacher" (branch_lora's EMA teacher). reg_loss always uses the live
+    cosine head regardless."""
     ema: TeacherEmaConfig
 
 
@@ -276,6 +280,15 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             "branch_mlp.ema.hard_copy_iters has no effect under branch_mlp.ema.schedule: "
             "ramp -- remove it"
+        )
+    if cfg.branch_mlp.self_reference not in ("own_clip", "own_teacher", "lora_teacher"):
+        raise ValueError(
+            f"branch_mlp.self_reference must be one of own_clip, own_teacher, "
+            f"lora_teacher, got {cfg.branch_mlp.self_reference!r}"
+        )
+    if cfg.branch_mlp.self_reference == "lora_teacher" and not cfg.branch_lora.enabled:
+        raise ValueError(
+            "branch_mlp.self_reference: lora_teacher needs branch_lora.enabled: true"
         )
     if cfg.data.name not in DATASET_NAMES:
         raise ValueError(f"data.name must be one of {sorted(DATASET_NAMES)}, got {cfg.data.name!r}")

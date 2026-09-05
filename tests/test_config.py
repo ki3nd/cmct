@@ -22,7 +22,7 @@ def test_shipped_config_parses_to_the_documented_effective_values():
     assert cfg.branch_lora.warmup.iters == 50
     assert cfg.branch_lora.ema_momentum == 0.99
     assert cfg.branch_mlp.warmup_iters == 500
-    assert cfg.branch_mlp.self_from_teacher is True
+    assert cfg.branch_mlp.self_reference == "own_teacher"
     assert cfg.branch_mlp.ema.schedule == "ramp"
     assert cfg.branch_mlp.ema.hard_copy_iters is None  # inert under "ramp", so absent
     assert cfg.train.iters == 1000
@@ -183,3 +183,27 @@ def test_the_hard_copy_schedule_takes_its_own_window(tmp_path):
     cfg = Config.from_yaml(str(p))
     assert cfg.branch_mlp.ema.schedule == "hard_copy"
     assert cfg.branch_mlp.ema.hard_copy_iters == 50
+
+
+@pytest.mark.parametrize("source", ["own_clip", "own_teacher", "lora_teacher"])
+def test_every_self_reference_source_parses(tmp_path, source):
+    p = tmp_path / f"{source}.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("self_reference: own_teacher", f"self_reference: {source}"))
+    assert Config.from_yaml(str(p)).branch_mlp.self_reference == source
+
+
+def test_an_unknown_self_reference_source_is_rejected(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("self_reference: own_teacher", "self_reference: frozen"))
+    with pytest.raises(ValueError, match="self_reference"):
+        Config.from_yaml(str(p))
+
+
+def test_the_lora_teacher_source_needs_the_lora_branch(tmp_path):
+    """train.py would call teacher_lora(...) on None otherwise."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH)
+                 .replace("self_reference: own_teacher", "self_reference: lora_teacher")
+                 .replace("enabled: true", "enabled: false", 1))
+    with pytest.raises(ValueError, match="lora_teacher"):
+        Config.from_yaml(str(p))

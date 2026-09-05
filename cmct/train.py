@@ -300,7 +300,7 @@ def main():
     # one covers teacher_frozen (the warmup self-reference) and teacher_lora
     # (the self-reference post-warmup, and the cross-reference to the CMKD
     # branch); the CMKD one covers the CMKD teacher's cosine branch, and only
-    # when branch_mlp.self_from_teacher is set. Neither covers
+    # under branch_mlp.self_reference: own_teacher. Neither covers
     # teacher_classifier's output, which is not a CLIP prediction.
     use_debias = config.pseudo_label.debias.enabled
     debias_lora = DebiasTracker(
@@ -397,20 +397,27 @@ def main():
                 # (label_smoothing baked in) and transfer_loss, the full CMKD
                 # self-training loss (task_loss + distill_loss + reg_loss) -- no
                 # teacher/EMA involved in it by default (the real CMKD design),
-                # UNLESS branch_mlp.self_from_teacher is set.
+                # UNLESS branch_mlp.self_reference picks a teacher.
                 self_ref_logit_clip = None
-                if config.branch_mlp.self_from_teacher:
+                prob_cross_mlp = None
+                if config.branch_mlp.self_reference == "own_teacher":
                     with torch.no_grad():
                         teacher_feat_u_mlp = model_mlp.teacher_model.forward_features(data_u_mlp)
                         self_ref_logit_clip = model_mlp.teacher_model.forward_head(teacher_feat_u_mlp).detach()
                         if use_debias:
-                            # The CMKD teacher's cosine branch IS a genuine CLIP
-                            # prediction (unlike teacher_classifier) -- its own
-                            # tracker, separate from the LoRA branch's. Only
-                            # reachable here, since this is the only place that
-                            # cosine branch is computed OUTSIDE TransferNet's own
-                            # forward().
+                            # A genuine CLIP prediction (unlike teacher_classifier),
+                            # so it uses this branch's own tracker.
                             self_ref_logit_clip = debias_mlp.correct(self_ref_logit_clip)
+                elif config.branch_mlp.self_reference == "lora_teacher":
+                    # The same tensor the cross term below wants: one forward and
+                    # one debias_lora update feed both. Runs during this branch's
+                    # warmup too, where the cross term does not.
+                    with torch.no_grad():
+                        logits_lora_on_u_mlp, _ = teacher_lora(data_u_mlp)
+                        if use_debias:
+                            logits_lora_on_u_mlp = debias_lora.correct(logits_lora_on_u_mlp)
+                        prob_cross_mlp = F.softmax(logits_lora_on_u_mlp, dim=-1)
+                        self_ref_logit_clip = logits_lora_on_u_mlp
                 clf_loss, transfer_loss, target_logits_mlp = model_mlp(
                     data_x_mlp, data_u_mlp, label_x_mlp,
                     self_ref_logit_clip=self_ref_logit_clip,
@@ -429,11 +436,12 @@ def main():
                     # mutated classifier_layer's BatchNorm1d running stats an extra
                     # time regardless of the cross weight's value. Neither concern
                     # applies anymore -- target_logits_mlp is free.
-                    with torch.no_grad():
-                        logits_lora_on_u_mlp, _ = teacher_lora(data_u_mlp)
-                        if use_debias:
-                            logits_lora_on_u_mlp = debias_lora.correct(logits_lora_on_u_mlp)
-                        prob_cross_mlp = F.softmax(logits_lora_on_u_mlp, dim=-1)
+                    if prob_cross_mlp is None:
+                        with torch.no_grad():
+                            logits_lora_on_u_mlp, _ = teacher_lora(data_u_mlp)
+                            if use_debias:
+                                logits_lora_on_u_mlp = debias_lora.correct(logits_lora_on_u_mlp)
+                            prob_cross_mlp = F.softmax(logits_lora_on_u_mlp, dim=-1)
                     loss_mlp_cross = masked_cross_entropy(target_logits_mlp, prob_cross_mlp, confi)
                     loss_mlp = loss_mlp_self + config.branch_mlp.cross_weight * loss_mlp_cross
 

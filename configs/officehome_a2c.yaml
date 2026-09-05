@@ -60,7 +60,7 @@ branch_mlp:
   lamb_gamma: 1.0
   warmup_iters: 500
   cross_weight: 0.5
-  self_from_teacher: true
+  self_reference: own_teacher   # own_clip | own_teacher | lora_teacher
   ema: {momentum: 0.99, schedule: ramp}
 
 pseudo_label:
