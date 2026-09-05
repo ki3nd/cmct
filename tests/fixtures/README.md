@@ -16,7 +16,7 @@ investigate the code, not to refresh the fixture.
 - `cmkd_loss.json` -- `CMKD.forward` in `cmct/branch_mlp/loss.py`: single-call
   values and multi-step sequences for both the live-cosine-branch and
   teacher self-reference arms, used by `tests/test_branch_mlp.py`.
-- `ema_schedule.json` -- `ema_momentum_at` in `cmct/train.py`: the "dacs" and
+- `ema_schedule.json` -- `ema_momentum_at` in `cmct/train.py`: the "ramp" and
   "hard_copy" EMA momentum schedules, used by `tests/test_train_schedules.py`.
 - `lambda_schedule.json` -- `LambdaScheduler.lamb` in
   `cmct/branch_mlp/loss.py`: the sigmoid ramp used to weight the CMKD task

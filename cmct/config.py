@@ -146,7 +146,8 @@ class Lambdas:
 class TeacherEmaConfig:
     momentum: float
     schedule: str
-    hard_copy_iters: int
+    hard_copy_iters: int | None = None
+    """Only "hard_copy" reads this; `_validate` rejects it under "ramp"."""
 
 
 @dataclass(frozen=True)
@@ -219,12 +220,19 @@ def _build(cls, raw: Any, path: str):
     if unknown:
         where = f"{path}." if path else ""
         raise ValueError(f"unknown config key(s): {', '.join(where + k for k in unknown)}")
-    missing = sorted(set(known) - set(raw))
+    # Fields with a default may be omitted from the YAML; `_validate` says when.
+    required = {
+        n for n, f in known.items()
+        if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING
+    }
+    missing = sorted(required - set(raw))
     if missing:
         where = f"{path}." if path else ""
         raise ValueError(f"missing config key(s): {', '.join(where + k for k in missing)}")
     kwargs = {}
     for name in known:
+        if name not in raw:
+            continue
         value = raw[name]
         child_path = f"{path}.{name}" if path else name
         field_type = hints[name]
@@ -255,9 +263,19 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             f"branch_lora.precision must be fp16 or fp32, got {cfg.branch_lora.precision!r}"
         )
-    if cfg.branch_mlp.ema.schedule not in ("dacs", "hard_copy"):
+    ema = cfg.branch_mlp.ema
+    if ema.schedule not in ("ramp", "hard_copy"):
         raise ValueError(
-            f"branch_mlp.ema.schedule must be dacs or hard_copy, got {cfg.branch_mlp.ema.schedule!r}"
+            f"branch_mlp.ema.schedule must be ramp or hard_copy, got {ema.schedule!r}"
+        )
+    if ema.schedule == "hard_copy" and ema.hard_copy_iters is None:
+        raise ValueError(
+            "branch_mlp.ema.hard_copy_iters is required under branch_mlp.ema.schedule: hard_copy"
+        )
+    if ema.schedule == "ramp" and ema.hard_copy_iters is not None:
+        raise ValueError(
+            "branch_mlp.ema.hard_copy_iters has no effect under branch_mlp.ema.schedule: "
+            "ramp -- remove it"
         )
     if cfg.data.name not in DATASET_NAMES:
         raise ValueError(f"data.name must be one of {sorted(DATASET_NAMES)}, got {cfg.data.name!r}")

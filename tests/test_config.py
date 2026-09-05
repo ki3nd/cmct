@@ -23,7 +23,8 @@ def test_shipped_config_parses_to_the_documented_effective_values():
     assert cfg.branch_lora.ema_momentum == 0.99
     assert cfg.branch_mlp.warmup_iters == 500
     assert cfg.branch_mlp.self_from_teacher is True
-    assert cfg.branch_mlp.ema.schedule == "dacs"
+    assert cfg.branch_mlp.ema.schedule == "ramp"
+    assert cfg.branch_mlp.ema.hard_copy_iters is None  # inert under "ramp", so absent
     assert cfg.train.iters == 1000
     assert cfg.train.mlp_steps_per_iter == 10
     assert cfg.data.batch_size.source == 32
@@ -43,7 +44,7 @@ def test_unknown_key_is_rejected_by_name(tmp_path):
 
 def test_invalid_ema_schedule_is_rejected(tmp_path):
     p = tmp_path / "bad.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace("schedule: dacs", "schedule: cosine"))
+    p.write_text(read_text(CONFIG_PATH).replace("schedule: ramp", "schedule: cosine"))
     with pytest.raises(ValueError, match="schedule"):
         Config.from_yaml(str(p))
 
@@ -91,8 +92,8 @@ def test_unknown_key_at_a_nested_path_is_rejected_by_full_dotted_path(tmp_path):
     levels down must name where it is, not just that something is wrong."""
     p = tmp_path / "bad.yaml"
     p.write_text(read_text(CONFIG_PATH).replace(
-        "  ema: {momentum: 0.99, schedule: dacs, hard_copy_iters: 100}",
-        "  ema: {momentum: 0.99, schedule: dacs, hard_copy_iters: 100, momentom: 0.5}"))
+        "  ema: {momentum: 0.99, schedule: ramp}",
+        "  ema: {momentum: 0.99, schedule: ramp, momentom: 0.5}"))
     with pytest.raises(ValueError, match=r"branch_mlp\.ema\.momentom"):
         Config.from_yaml(str(p))
 
@@ -102,8 +103,8 @@ def test_missing_key_is_rejected_by_full_dotted_path(tmp_path):
     since the whole point of this layer is that every effective value is
     written down in one file."""
     p = tmp_path / "bad.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace("  schedule: dacs\n", "")
-                 .replace("schedule: dacs, ", ""))
+    p.write_text(read_text(CONFIG_PATH).replace("  schedule: ramp\n", "")
+                 .replace(", schedule: ramp", ""))
     with pytest.raises(ValueError, match=r"branch_mlp\.ema\.schedule"):
         Config.from_yaml(str(p))
 
@@ -155,3 +156,30 @@ def test_disabling_both_branches_is_rejected(tmp_path):
     p.write_text(read_text(CONFIG_PATH).replace("enabled: true", "enabled: false"))
     with pytest.raises(ValueError, match="nothing left to train"):
         Config.from_yaml(str(p))
+
+
+def test_hard_copy_iters_is_rejected_under_the_ramp_schedule(tmp_path):
+    """`ema_momentum_at` never reads it under "ramp", so accepting it would let
+    a number sit in the config file looking like it governs something."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace(
+        "schedule: ramp}", "schedule: ramp, hard_copy_iters: 100}"))
+    with pytest.raises(ValueError, match="hard_copy_iters"):
+        Config.from_yaml(str(p))
+
+
+def test_hard_copy_iters_is_required_under_the_hard_copy_schedule(tmp_path):
+    """The mirror: that schedule has no window without it."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("schedule: ramp}", "schedule: hard_copy}"))
+    with pytest.raises(ValueError, match="hard_copy_iters"):
+        Config.from_yaml(str(p))
+
+
+def test_the_hard_copy_schedule_takes_its_own_window(tmp_path):
+    p = tmp_path / "hard_copy.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace(
+        "schedule: ramp}", "schedule: hard_copy, hard_copy_iters: 50}"))
+    cfg = Config.from_yaml(str(p))
+    assert cfg.branch_mlp.ema.schedule == "hard_copy"
+    assert cfg.branch_mlp.ema.hard_copy_iters == 50

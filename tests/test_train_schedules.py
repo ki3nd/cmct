@@ -5,11 +5,11 @@ from cmct.train import ema_momentum_at
 from tests.conftest import load_fixture
 
 
-def test_dacs_schedule_matches_the_frozen_baseline():
+def test_ramp_schedule_matches_the_frozen_baseline():
     fx = load_fixture("ema_schedule.json")
-    got = [ema_momentum_at(t, fx["momentum"], "dacs", fx["hard_copy_iters"])
-           for t in range(len(fx["dacs"]))]
-    assert got == fx["dacs"]
+    got = [ema_momentum_at(t, fx["momentum"], "ramp", fx["hard_copy_iters"])
+           for t in range(len(fx["ramp"]))]
+    assert got == fx["ramp"]
 
 
 def test_hard_copy_schedule_matches_the_frozen_baseline():
@@ -19,8 +19,8 @@ def test_hard_copy_schedule_matches_the_frozen_baseline():
     assert got == fx["hard_copy"]
 
 
-def test_dacs_first_update_is_a_hard_copy():
-    assert ema_momentum_at(0, 0.99, "dacs", 100) == 0.0
+def test_ramp_first_update_is_a_hard_copy():
+    assert ema_momentum_at(0, 0.99, "ramp", 100) == 0.0
 
 
 def test_evaluate_reports_none_for_a_branch_that_is_switched_off():

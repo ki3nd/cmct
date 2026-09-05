@@ -61,7 +61,7 @@ branch_mlp:
   warmup_iters: 500
   cross_weight: 0.5
   self_from_teacher: true
-  ema: {momentum: 0.99, schedule: dacs, hard_copy_iters: 100}
+  ema: {momentum: 0.99, schedule: ramp}
 
 pseudo_label:
   threshold: 0.85             # CONFI, shared by both branches

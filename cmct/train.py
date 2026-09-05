@@ -49,13 +49,13 @@ LORA_PROMPT_TEMPLATE = "a photo of a {}."
 
 
 
-def ema_momentum_at(step: int, momentum: float, schedule: str, hard_copy_iters: int) -> float:
+def ema_momentum_at(step: int, momentum: float, schedule: str,
+                    hard_copy_iters: int | None) -> float:
     """Momentum shared by the CMKD teacher's backbone and its head.
 
-    "dacs" ramps min(t / (t + 1), momentum) from t = 0, so the first update is a
-    hard copy of the student's already-stepped weights and it approaches the
-    target over roughly momentum / (1 - momentum) steps. "hard_copy" keeps
-    momentum at 0 for hard_copy_iters steps, then jumps.
+    "ramp": min(t/(t+1), momentum) from t=0 -- Mean Teacher's alpha schedule.
+    First update is a hard copy; `hard_copy_iters` is unused.
+    "hard_copy": momentum 0 for hard_copy_iters steps, then a jump.
 
     Backbone and head always share this value: the head is trained against the
     live backbone's features, so a smoothed backbone paired with an
@@ -444,7 +444,7 @@ def main():
 
                 # The EMA update runs AFTER optim_mlp.step(), and with the
                 # PRE-increment `mlp_step_global` (incremented only at the bottom
-                # of this loop) -- so under the "dacs" schedule, the very first
+                # of this loop) -- so under the "ramp" schedule, the very first
                 # EMA update (step 0) is a hard copy of weights that have already
                 # taken one optimizer step, not of the random init. Both matter:
                 # reversing the order would make step 0's hard copy capture the
