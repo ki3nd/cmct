@@ -7,9 +7,21 @@ is needed.
 
 import torch
 
+_TRACKED_SUFFIXES = ("prompt_learner.ctx",)
+"""Non-LoRA leaves the teacher must also track.
+
+The prompt context is trained like a LoRA factor but is not named like one, and
+a teacher left holding its initial context while the student's moves is a
+divergence nothing reports. Keep this list and PromptLearner's parameter names
+in step.
+"""
+
 
 def _lora_param_items(model):
-    return [(k, v) for k, v in model.state_dict().items() if "lora_" in k]
+    return [
+        (k, v) for k, v in model.state_dict().items()
+        if "lora_" in k or k.endswith(_TRACKED_SUFFIXES)
+    ]
 
 
 @torch.no_grad()

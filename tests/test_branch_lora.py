@@ -66,3 +66,33 @@ def test_text_lora_can_be_switched_off(clip_weights):
                       for m in block.children()}
     assert not any(id(layer) in text_layer_ids for layer in layers_vision_only)
     assert not any("lora_" in n for n, _ in model.text_encoder.named_parameters())
+
+
+def test_the_teacher_copy_covers_the_prompt_context():
+    """Guards a silent divergence: the copy filters on "lora_", which the
+    context's name does not match, so without this the teacher would keep its
+    initial context forever while the student's moved -- two different text
+    embeddings, no error.
+    """
+    import torch
+    import torch.nn as nn
+
+    from cmct.branch_lora.ema import copy_lora_params, ema_update_lora_params
+
+    class Fake(nn.Module):
+        def __init__(self, ctx, lora):
+            super().__init__()
+            self.prompt_learner = nn.Module()
+            self.prompt_learner.ctx = nn.Parameter(torch.full((4, 8), ctx))
+            self.lora_A = nn.Parameter(torch.full((2, 8), lora))
+
+    student, teacher = Fake(1.0, 3.0), Fake(0.0, 0.0)
+    copy_lora_params(student, teacher)
+    assert torch.allclose(teacher.prompt_learner.ctx, torch.full((4, 8), 1.0))
+    assert torch.allclose(teacher.lora_A, torch.full((2, 8), 3.0))
+
+    # momentum 0.0 is the EMA-off setting the shipped config uses: a hard copy.
+    student2 = Fake(5.0, 7.0)
+    ema_update_lora_params(teacher, student2, 0.0)
+    assert torch.allclose(teacher.prompt_learner.ctx, torch.full((4, 8), 5.0))
+    assert torch.allclose(teacher.lora_A, torch.full((2, 8), 7.0))
