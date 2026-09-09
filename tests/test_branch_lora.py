@@ -35,6 +35,7 @@ def test_text_lora_can_be_switched_off(clip_weights):
     training the text tower while the design says the prompt is the only
     text-side adaptation, and nothing would crash.
     """
+    import os
     import torch
 
     from cmct.branch_lora.model import LoraCLIP, load_clip_to_cpu
@@ -43,13 +44,17 @@ def test_text_lora_can_be_switched_off(clip_weights):
     kwargs = dict(backbone_name="ViT-B/16", position="all", params=["q", "k", "v"],
                   r=2, alpha=1, dropout=0.25, rank_ramp=[2, 4, 6, 8, 10])
 
+    # Derive the directory from the fixture's resolved path so the fixture's
+    # skip-guard actually gates what we load.
+    weights_dir = os.path.dirname(clip_weights)
+
     # LoraCLIP's CURRENT signature -- template positional, no prompt arguments.
     # Task 3 changes it to keywords and updates this one call.
-    clip_model = load_clip_to_cpu("ViT-B/16", "./assets")
+    clip_model = load_clip_to_cpu("ViT-B/16", weights_dir)
     model = LoraCLIP(["dog", "cat"], clip_model, "a photo of a {}.")
     layers_vision_only = apply_lora(model, **kwargs, text=False)
 
-    clip_model2 = load_clip_to_cpu("ViT-B/16", "./assets")
+    clip_model2 = load_clip_to_cpu("ViT-B/16", weights_dir)
     model2 = LoraCLIP(["dog", "cat"], clip_model2, "a photo of a {}.")
     layers_both = apply_lora(model2, **kwargs, text=True)
 

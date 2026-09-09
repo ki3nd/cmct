@@ -15,13 +15,15 @@ def _clip_weight_candidates():
     """Candidate ViT-B/16 weight paths, in priority order.
 
     The default is CLIP's own download cache; `CMCT_CLIP_WEIGHTS` overrides it
-    for anyone who has the weights staged elsewhere.
+    for anyone who has the weights staged elsewhere. The repo's own configured
+    location (./assets) is checked last, since shipped backups have lower priority.
     """
     candidates = []
     env_path = os.environ.get("CMCT_CLIP_WEIGHTS")
     if env_path:
         candidates.append(Path(env_path))
     candidates.append(Path.home() / ".cache" / "clip" / "ViT-B-16.pt")
+    candidates.append(REPO_ROOT / "assets" / "ViT-B-16.pt")
     return candidates
 
 
