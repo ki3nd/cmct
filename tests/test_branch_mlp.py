@@ -1,4 +1,5 @@
 
+import pytest
 import torch
 
 from cmct.branch_mlp.backbone import PROMPTS, prompts_for
@@ -129,3 +130,28 @@ def test_self_reference_actually_changes_the_loss_once_lamb_is_nonzero():
             assert got_live != got_self, (
                 f"step {i}: self-reference had no effect on the loss")
             assert abs((got_self - got_live) - (self_ref[i] - live[i])) < 1e-9, i
+
+
+def test_set_text_features_validates_shape_and_normalizes():
+    """The handoff crosses a precision boundary -- branch_lora may be fp16,
+    branch_mlp is always fp32 -- and a class-count mismatch here would surface
+    as a shape error deep inside CMKD.forward instead. Both are cheap to catch
+    at the seam.
+    """
+    import torch
+
+    from cmct.branch_mlp.backbone import ClipBackbone
+
+    backbone = ClipBackbone.__new__(ClipBackbone)          # no CLIP download
+    backbone.text_features = torch.zeros(3, 8)
+
+    good = torch.randn(3, 8, dtype=torch.float16) * 5.0
+    backbone.set_text_features(good)
+    assert backbone.text_features.dtype is torch.float32
+    assert backbone.text_features.requires_grad is False
+    torch.testing.assert_close(
+        backbone.text_features.norm(dim=1), torch.ones(3), rtol=1e-5, atol=1e-5
+    )
+
+    with pytest.raises(ValueError, match="4 classes"):
+        backbone.set_text_features(torch.randn(4, 8))

@@ -386,6 +386,20 @@ def main():
                     # macro-step and its result is multiplied by zero.
                     prob_cross_for_lora = None
 
+        # branch_mlp's cosine branch reads branch_lora's text embeddings once
+        # branch_mlp's own warmup is past. Pushed here, once per macro-step,
+        # rather than inside the micro loop: the context only moves on
+        # branch_lora's single update per macro-step, so all
+        # mlp_steps_per_iter micro-steps share one embedding and the extra text
+        # encoder forward is paid once instead of ten times.
+        #
+        # This is a ONE-WAY handoff. set_text_features detaches, so no gradient
+        # reaches the context from this branch -- branch_lora is its sole owner.
+        if mlp_enabled and config.branch_mlp.shared_prompt and lora_enabled:
+            if mlp_step_global >= config.branch_mlp.warmup_iters:
+                with torch.no_grad():
+                    model_mlp.base_network.set_text_features(student_lora.text_features())
+
         if mlp_enabled:
             for _ in range(config.train.mlp_steps_per_iter):
                 in_warmup_mlp = mlp_step_global < config.branch_mlp.warmup_iters
