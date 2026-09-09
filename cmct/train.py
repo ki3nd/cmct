@@ -41,11 +41,13 @@ from cmct.evaluate import evaluate
 from cmct.losses import DebiasTracker, masked_cross_entropy, mk_mmd
 from vendor.dassl.utils import mkdir_if_missing, set_random_seed
 
-# The LoRA branch's prompt: every dataset this entry point supports maps to
-# this one template. branch_mlp uses its own separate hardcoded prompt lists
-# (cmct/branch_mlp/backbone.py) -- the two are deliberately different and must
-# not be conflated.
-LORA_PROMPT_TEMPLATE = "a photo of a {}."
+# Both branches prompt CLIP with the SAME literal list, branch_mlp's
+# per-dataset one (cmct/branch_mlp/backbone.py's PROMPTS). The LoRA branch used
+# to build its own from a "a photo of a {}." template, which agreed with that
+# list on four of six datasets by coincidence and differed on officehome. Since
+# branch_mlp now reads this branch's text embeddings, any prompt difference
+# would show up there as a text-space change on top of the LoRA adaptation --
+# so there is exactly one list, and the order assert below guards it for both.
 
 
 
@@ -66,7 +68,7 @@ def ema_momentum_at(step: int, momentum: float, schedule: str,
     return min(step / (step + 1), momentum)
 
 
-def build_lora_pair(config: Config, classnames, device):
+def build_lora_pair(config: Config, prompts, device):
     """The LoRA student and its frozen EMA teacher.
 
     Supports ViT backbones only.
@@ -87,8 +89,8 @@ def build_lora_pair(config: Config, classnames, device):
         clip_student.float()
         clip_teacher.float()
 
-    student = LoraCLIP(classnames, clip_student, LORA_PROMPT_TEMPLATE)
-    teacher = FrozenTeacherCLIP(classnames, clip_teacher, LORA_PROMPT_TEMPLATE)
+    student = LoraCLIP(prompts, clip_student)
+    teacher = FrozenTeacherCLIP(prompts, clip_teacher)
     lora_layers_student = apply_lora(student, **lora_kwargs)
     lora_layers_teacher = apply_lora(teacher, **lora_kwargs)
 
@@ -172,42 +174,40 @@ def main():
     classnames = dm_lora.dataset.classnames
     num_classes = dm_lora.num_classes
 
-    # Only branch_mlp reads these prompts, so a LoRA-only run neither needs
-    # them nor should be stopped by them.
-    if mlp_enabled:
-        # The CMKD branch prompts CLIP with a per-dataset list of literal strings
-        # (branch_mlp/backbone.py), and nothing in the code makes that list agree
-        # with the order dassl assigns labels in. If they ever diverged, that
-        # branch's cosine logits would be silently mislabelled and every test would
-        # still pass -- no unit test can catch it, because dassl sorts the CASED
-        # directory names ("TV" < "Table") and a synthetic test tree cannot
-        # reconstruct the real ones. So assert it here, against the dataset
-        # actually on disk, before any GPU time is spent. This also catches a
-        # partly-downloaded dataset, which would otherwise surface as a shape
-        # mismatch deep inside CMKD.forward.
-        prompts = prompts_for(config.data.name)
-        if len(prompts) != num_classes:
-            raise RuntimeError(
-                f"branch_mlp has {len(prompts)} prompts for '{config.data.name}' but the "
-                f"dataset at {config.data.root} yielded {num_classes} classes -- a partly "
-                f"downloaded dataset, or the wrong data.name"
-            )
-        misaligned = [
-            (i, p, c) for i, (p, c) in enumerate(zip(prompts, classnames))
-            if not p.endswith(c.replace("_", " "))
-        ]
-        if misaligned:
-            i, prompt, classname = misaligned[0]
-            raise RuntimeError(
-                f"branch_mlp's prompt list is out of order with dassl's classnames: "
-                f"at index {i} the prompt is {prompt!r} but the class is {classname!r} "
-                f"({len(misaligned)} of {num_classes} misaligned)"
-            )
+    # BOTH branches prompt CLIP with this per-dataset list of literal strings
+    # (branch_mlp/backbone.py), and nothing in the code makes that list agree
+    # with the order dassl assigns labels in. If they ever diverged, both
+    # branches' cosine logits would be silently mislabelled and every test would
+    # still pass -- no unit test can catch it, because dassl sorts the CASED
+    # directory names ("TV" < "Table") and a synthetic test tree cannot
+    # reconstruct the real ones. So assert it here, against the dataset actually
+    # on disk, before any GPU time is spent. This also catches a partly-
+    # downloaded dataset, which would otherwise surface as a shape mismatch deep
+    # inside CMKD.forward. It is NOT gated on either branch being enabled: the
+    # LoRA branch reads the same list now, so a LoRA-only run depends on it too.
+    prompts = prompts_for(config.data.name)
+    if len(prompts) != num_classes:
+        raise RuntimeError(
+            f"there are {len(prompts)} prompts for '{config.data.name}' but the "
+            f"dataset at {config.data.root} yielded {num_classes} classes -- a partly "
+            f"downloaded dataset, or the wrong data.name"
+        )
+    misaligned = [
+        (i, p, c) for i, (p, c) in enumerate(zip(prompts, classnames))
+        if not p.endswith(c.replace("_", " "))
+    ]
+    if misaligned:
+        i, prompt, classname = misaligned[0]
+        raise RuntimeError(
+            f"the prompt list is out of order with dassl's classnames: "
+            f"at index {i} the prompt is {prompt!r} but the class is {classname!r} "
+            f"({len(misaligned)} of {num_classes} misaligned)"
+        )
 
     if lora_enabled:
         print("Building the LoRA branch's student/teacher")
         student_lora, teacher_lora, _, lora_layers_teacher = build_lora_pair(
-            config, classnames, device
+            config, prompts, device
         )
     else:
         student_lora, teacher_lora, lora_layers_teacher = None, None, None
@@ -286,7 +286,7 @@ def main():
         clip_frozen = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)
         if config.branch_lora.precision == "fp32":
             clip_frozen.float()
-        teacher_frozen = FrozenTeacherCLIP(classnames, clip_frozen, LORA_PROMPT_TEMPLATE).to(device)
+        teacher_frozen = FrozenTeacherCLIP(prompts, clip_frozen).to(device)
         for param in teacher_frozen.parameters():
             param.requires_grad_(False)
         teacher_frozen.eval()
@@ -370,6 +370,26 @@ def main():
                     # branch_lora.cross_weight at 0.0 the pass still runs each
                     # macro-step and its result is multiplied by zero.
                     prob_cross_for_lora = None
+
+        # branch_mlp's cosine branch reads the LoRA teacher's text embeddings
+        # once branch_mlp's own warmup is past. Both branches tokenize the same
+        # prompt strings, so what changes here is purely the text tower's LoRA
+        # adaptation -- not the prompt.
+        #
+        # Pushed here, once per macro-step, rather than inside the micro loop:
+        # the text tower only moves on branch_lora's single update per
+        # macro-step, so all mlp_steps_per_iter micro-steps share one embedding
+        # and the extra text-encoder forward is paid once instead of ten times.
+        #
+        # ONE-WAY: set_text_features detaches, so no gradient crosses back into
+        # branch_lora. Read from teacher_lora rather than the student, so the
+        # embedding is a temporal average -- with branch_lora.ema_momentum at
+        # 0.0 that teacher is a hard copy of the student in eval mode, which is
+        # the same weights with LoRA dropout off.
+        if mlp_enabled and config.branch_mlp.shared_text and lora_enabled:
+            if mlp_step_global >= config.branch_mlp.warmup_iters:
+                with torch.no_grad():
+                    model_mlp.base_network.set_text_features(teacher_lora.text_features())
 
         if mlp_enabled:
             for _ in range(config.train.mlp_steps_per_iter):

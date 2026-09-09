@@ -61,7 +61,14 @@ class LoraCLIP(nn.Module):
     the normalized feature to MK-MMD.
     """
 
-    def __init__(self, classnames, clip_model, template: str):
+    def __init__(self, prompts, clip_model):
+        """`prompts` is the LITERAL prompt list, one string per class, in the
+        dataset's label order -- the same list branch_mlp uses
+        (branch_mlp/backbone.py's PROMPTS). Both branches therefore tokenize
+        identical strings by construction rather than by two templates
+        happening to agree, which is what lets branch_mlp read this branch's
+        text embeddings and see only the LoRA adaptation, not a prompt change.
+        """
         super().__init__()
         self.text_encoder = Simple_TextEncoder(clip_model)
 
@@ -70,13 +77,20 @@ class LoraCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
-        prompt_prefix = template
-        prompts = [prompt_prefix.format(c.replace("_", " ")) for c in classnames]
         self.tokenized_prompts = clip.tokenize(prompts)
 
-    def forward(self, image, normalize_feat=True):
+    def text_features(self):
+        """L2-normalized text embeddings, one row per class.
+
+        Recomputed on every call: LoRA sits on the text transformer too (see
+        lora/apply.py's _apply_text_lora), so these move as the branch trains
+        and a cached copy would go stale after any update.
+        """
         text_features = self.text_encoder(self.tokenized_prompts.to(self.logit_scale.device))
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        return text_features / text_features.norm(dim=-1, keepdim=True)
+
+    def forward(self, image, normalize_feat=True):
+        text_features = self.text_features()
 
         image_features = self.image_encoder(image.type(self.dtype))
         image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)

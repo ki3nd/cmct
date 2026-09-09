@@ -167,6 +167,13 @@ class BranchMlpConfig:
     warmup_iters: int
     cross_weight: float
     self_from_teacher: bool
+    shared_text: bool
+    """Read branch_lora's LoRA-adapted text embeddings for this branch's cosine
+    head, once `warmup_iters` is past. Before that this branch keeps the
+    embeddings it built at init from the same prompt list, through its own
+    frozen text encoder -- so the handoff changes only the text tower's LoRA
+    adaptation, never the prompt."""
+
     ema: TeacherEmaConfig
 
 
@@ -276,6 +283,43 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             "branch_mlp.ema.hard_copy_iters has no effect under branch_mlp.ema.schedule: "
             "ramp -- remove it"
+        )
+    if cfg.branch_mlp.shared_text and not cfg.branch_lora.enabled:
+        raise ValueError(
+            "branch_mlp.shared_text: true needs branch_lora.enabled: true -- there are "
+            "no LoRA text embeddings to share otherwise, and the setting would be "
+            "silently inert"
+        )
+    if cfg.branch_mlp.shared_text and (
+        cfg.branch_lora.backbone.name != cfg.branch_mlp.backbone.name
+    ):
+        # The branches carry independent backbone settings and the shared text
+        # embedding has to match branch_mlp's image-feature width: 512 for
+        # ViT-B/16, 1024 for RN50. ClipBackbone.set_text_features would catch a
+        # mismatch, but only at the first push -- after warmup_iters micro-steps
+        # of GPU time. LORA_BACKBONES and MLP_BACKBONES overlap on ViT-B/16
+        # alone, so equal names is exactly the right rule here.
+        raise ValueError(
+            f"branch_mlp.shared_text: true needs both branches on the same backbone, "
+            f"got branch_lora {cfg.branch_lora.backbone.name!r} and branch_mlp "
+            f"{cfg.branch_mlp.backbone.name!r}"
+        )
+    if cfg.branch_mlp.shared_text and cfg.branch_mlp.self_from_teacher:
+        # The push targets base_network only, and ClipBackbone.text_features is a
+        # plain attribute rather than a registered buffer, so ema_update_teacher
+        # -- which iterates state_dict() -- can never propagate it to
+        # teacher_model, not even at momentum 0. Under self_from_teacher the
+        # CMKD self-reference would then come from teacher_model's ORIGINAL
+        # embeddings while target_clip_logits and reg_loss come from
+        # branch_lora's adapted ones: two different text spaces compared inside
+        # one loss, with no shape error and a healthy-looking loss.
+        raise ValueError(
+            "branch_mlp.shared_text: true is incompatible with "
+            "branch_mlp.self_from_teacher: true -- the push reaches base_network but "
+            "never teacher_model (text_features is a plain attribute, so the "
+            "state_dict-based EMA cannot carry it), so CMKD would compare its "
+            "self-reference and its regularization term across two different text "
+            "spaces. Set self_from_teacher: false"
         )
     if cfg.data.name not in DATASET_NAMES:
         raise ValueError(f"data.name must be one of {sorted(DATASET_NAMES)}, got {cfg.data.name!r}")

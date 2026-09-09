@@ -58,6 +58,24 @@ class ClipBackbone(nn.Module):
         text_features = self.encode_text().detach().cuda()
         self.text_features = text_features / text_features.norm(dim=1, keepdim=True)
 
+    def set_text_features(self, text_features):
+        """Replace this branch's cosine text embeddings, e.g. with branch_lora's.
+
+        Detached, cast to fp32 and re-normalized here rather than at the call
+        site: this branch's backbone is always fp32 while branch_lora may run
+        fp16, and this branch must never write a gradient back into the other
+        branch's LoRA. A class-count or width mismatch is rejected here because
+        it would otherwise surface as an opaque shape error inside CMKD.forward.
+        """
+        expected = self.text_features.shape
+        if text_features.shape != expected:
+            raise ValueError(
+                f"set_text_features expected {tuple(expected)}, got "
+                f"{tuple(text_features.shape)}"
+            )
+        text_features = text_features.detach().float()
+        self.text_features = text_features / text_features.norm(dim=1, keepdim=True)
+
     def forward_features(self, x):
         feature = self.model.encode_image(x)
         return feature
