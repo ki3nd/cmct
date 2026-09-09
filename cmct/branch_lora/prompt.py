@@ -18,6 +18,12 @@ import torch.nn as nn
 
 from cmct.clip import clip
 
+CTX_PARAM_NAME = "prompt_learner.ctx"
+"""The learnable context's fully-qualified parameter name, as it appears in
+`state_dict()`/`named_parameters()`. The single place this string is spelled
+out -- model.py's freeze loop, train.py's trainable-parameter loop and
+ema.py's tracked-suffix list all import it instead of repeating the literal."""
+
 
 class PromptLearner(nn.Module):
     def __init__(self, classnames, clip_model, *, n_ctx, template, learnable):

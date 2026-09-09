@@ -28,33 +28,26 @@ def test_ema_update_is_convex_combination():
     assert torch.allclose(ema.lora_A, torch.full((2, 2), 0.01))
 
 
-def test_text_lora_can_be_switched_off(clip_weights):
+def test_text_lora_can_be_switched_off(clip_model_factory):
     """With lora.text false, every injected layer belongs to the vision tower.
 
     Guards a failure that is otherwise silent: leaving text LoRA in would keep
     training the text tower while the design says the prompt is the only
     text-side adaptation, and nothing would crash.
     """
-    import os
-    import torch
-
-    from cmct.branch_lora.model import LoraCLIP, load_clip_to_cpu
+    from cmct.branch_lora.model import LoraCLIP
     from cmct.branch_lora.lora.apply import apply_lora
 
     kwargs = dict(backbone_name="ViT-B/16", position="all", params=["q", "k", "v"],
                   r=2, alpha=1, dropout=0.25, rank_ramp=[2, 4, 6, 8, 10])
 
-    # Derive the directory from the fixture's resolved path so the fixture's
-    # skip-guard actually gates what we load.
-    weights_dir = os.path.dirname(clip_weights)
-
-    # LoraCLIP's CURRENT signature -- template positional, no prompt arguments.
-    # Task 3 changes it to keywords and updates this one call.
-    clip_model = load_clip_to_cpu("ViT-B/16", weights_dir)
+    # Two independent model instances: apply_lora mutates a model's submodules
+    # in place, so this needs a fresh build per model rather than a shared one.
+    clip_model = clip_model_factory()
     model = LoraCLIP(["dog", "cat"], clip_model, template="a photo of a {}.", n_ctx=4, learnable=True)
     layers_vision_only = apply_lora(model, **kwargs, text=False)
 
-    clip_model2 = load_clip_to_cpu("ViT-B/16", weights_dir)
+    clip_model2 = clip_model_factory()
     model2 = LoraCLIP(["dog", "cat"], clip_model2, template="a photo of a {}.", n_ctx=4, learnable=True)
     layers_both = apply_lora(model2, **kwargs, text=True)
 

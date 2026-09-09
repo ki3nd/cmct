@@ -12,6 +12,7 @@ from typing import Any, get_type_hints
 
 import yaml
 
+from cmct.clip import clip
 from vendor.dassl.config import get_cfg_default
 
 # miniDomainNet is deliberately excluded: cmct/branch_mlp/backbone.py carries
@@ -130,17 +131,25 @@ class PromptConfig:
     False is not a no-op path: the context is still built and still used, but it
     stays at its initial value, which is the token embedding of
     `train.LORA_PROMPT_TEMPLATE`'s prefix. So `enabled: false` reproduces the
-    hand-written-template behaviour exactly, which is what makes it a usable
-    ablation baseline."""
+    hand-written-template behaviour exactly for `branch_lora`, which is what
+    makes it a usable ablation baseline -- but only for `branch_lora`. With
+    `shared_prompt: true`, `branch_mlp` still swaps its own text embeddings at
+    its warmup boundary (from officehome's hardcoded "an image of a {}" to
+    branch_lora's "a photo of a {}"), even with the context itself frozen. The
+    shipped ablation configs all pair this with `shared_prompt: false`, so
+    nothing is broken by default -- but this flag alone does not make the run a
+    faithful baseline for branch_mlp too."""
 
     n_ctx: int
     """Number of learnable context tokens, shared across all classes.
 
-    When it equals the token count of the template prefix (4 for
-    "a photo of a"), the context initialises from that prefix's embeddings and
-    `enabled: false` is bit-identical to the old template path. Any other value
-    initialises the surplus tokens from N(0, 0.02) instead, and that
-    equivalence no longer holds."""
+    Must equal the token count of the template prefix (4 for "a photo of a"):
+    the context initialises from that prefix's embeddings, one-for-one, so that
+    `enabled: false` is bit-identical to the old template path. A mismatch is
+    rejected at construction -- both here, at parse time (so a bad value fails
+    before any CLIP checkpoint is downloaded), and again in
+    `PromptLearner.__init__`, which raises `ValueError` rather than padding or
+    truncating."""
 
 
 @dataclass(frozen=True)
@@ -314,6 +323,32 @@ def _validate(cfg: Config) -> None:
     if cfg.branch_lora.prompt.n_ctx <= 0:
         raise ValueError(
             f"branch_lora.prompt.n_ctx must be positive, got {cfg.branch_lora.prompt.n_ctx}"
+        )
+    # "a photo of a {}." kept in step with train.py's LORA_PROMPT_TEMPLATE --
+    # inlined rather than imported, since train.py imports cmct.config and
+    # importing the constant back from train.py would be circular. n_ctx must
+    # equal this prefix's own token count one-for-one (PromptLearner.__init__
+    # enforces the same rule at construction); checking it here as well means a
+    # mismatch fails before any CLIP checkpoint is downloaded or built.
+    _lora_prefix = "a photo of a {}.".split("{}")[0].strip()
+    _prefix_ids = clip.tokenize(_lora_prefix)[0]
+    _prefix_n_tokens = int(_prefix_ids.argmax()) - 1  # strip SOT and EOT
+    if cfg.branch_lora.prompt.n_ctx != _prefix_n_tokens:
+        raise ValueError(
+            f"branch_lora.prompt.n_ctx={cfg.branch_lora.prompt.n_ctx} does not match "
+            f"the LoRA prompt template's prefix token count ({_prefix_n_tokens}) -- "
+            f"the context replaces that prefix one-for-one, or prompt.enabled: false "
+            f"would freeze noise into the prompt instead of reproducing the template"
+        )
+    if cfg.branch_mlp.shared_prompt and cfg.branch_mlp.self_from_teacher:
+        raise ValueError(
+            "branch_mlp.shared_prompt: true together with branch_mlp.self_from_teacher: "
+            "true would compare two different text spaces inside one loss -- CMKD's "
+            "self-reference would come from teacher_model's hardcoded PROMPTS embedding "
+            "space (teacher_model.text_features is a plain attribute, not a buffer, so "
+            "ema_update_teacher's state_dict() walk can never update it from "
+            "branch_lora's shared embeddings) while target_clip_logits and reg_loss come "
+            "from branch_lora's live, shared text space"
         )
     if cfg.branch_mlp.shared_prompt and not cfg.branch_lora.enabled:
         raise ValueError(

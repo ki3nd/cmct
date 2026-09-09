@@ -15,17 +15,15 @@ exactly what the old hand-written-template path produced.
 import pytest
 import torch
 
-from cmct.branch_lora.model import LoraCLIP, Simple_TextEncoder, load_clip_to_cpu
-from cmct.branch_lora.prompt import PromptLearner
+from cmct.branch_lora.model import LoraCLIP, Simple_TextEncoder
+from cmct.branch_lora.prompt import CTX_PARAM_NAME, PromptLearner
 from cmct.clip import clip
 
 CLASSNAMES = ["alarm clock", "fan", "desk lamp", "postit notes"]
 TEMPLATE = "a photo of a {}."
 
 
-def test_ctx_at_init_reproduces_the_template_text_features(clip_weights):
-    clip_model = load_clip_to_cpu("ViT-B/16", "./assets").float()
-
+def test_ctx_at_init_reproduces_the_template_text_features(clip_model):
     # The old path: tokenize the literal template, embed, encode.
     encoder = Simple_TextEncoder(clip_model)
     ids = clip.tokenize([TEMPLATE.format(c) for c in CLASSNAMES])
@@ -45,25 +43,36 @@ def test_ctx_at_init_reproduces_the_template_text_features(clip_weights):
     torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-4)
 
 
-def test_the_context_is_the_only_trainable_text_parameter(clip_weights):
-    clip_model = load_clip_to_cpu("ViT-B/16", "./assets").float()
+def test_the_context_is_the_only_trainable_text_parameter(clip_model):
     model = LoraCLIP(CLASSNAMES, clip_model, template=TEMPLATE, n_ctx=4, learnable=True)
 
     trainable = [n for n, p in model.named_parameters() if p.requires_grad]
-    assert trainable == ["prompt_learner.ctx"]
+    assert trainable == [CTX_PARAM_NAME]
     assert model.prompt_learner.ctx.shape == (4, clip_model.ln_final.weight.shape[0])
 
 
-def test_a_disabled_context_is_frozen(clip_weights):
-    clip_model = load_clip_to_cpu("ViT-B/16", "./assets").float()
+def test_a_disabled_context_is_frozen(clip_model):
     model = LoraCLIP(CLASSNAMES, clip_model, template=TEMPLATE, n_ctx=4, learnable=False)
     assert model.prompt_learner.ctx.requires_grad is False
 
 
-def test_n_ctx_mismatched_with_the_prefix_token_count_raises(clip_weights):
+def test_n_ctx_mismatched_with_the_prefix_token_count_raises(clip_model):
     """"a photo of a" is exactly 4 tokens. n_ctx=8 must not silently pad the
     context with untrained noise -- that would freeze noise into the prompt
     under prompt.enabled: false instead of reproducing the template."""
-    clip_model = load_clip_to_cpu("ViT-B/16", "./assets").float()
     with pytest.raises(ValueError):
         PromptLearner(CLASSNAMES, clip_model, n_ctx=8, template=TEMPLATE, learnable=True)
+
+
+def test_a_gradient_reaches_the_context(clip_model):
+    """requires_grad is not the same as a gradient actually arriving: this
+    fails if a future refactor detaches the expand/cat path in
+    PromptLearner.forward or otherwise rebuilds the context in a way that
+    severs it from the text encoder's output."""
+    model = LoraCLIP(CLASSNAMES, clip_model, template=TEMPLATE, n_ctx=4, learnable=True)
+
+    model.text_features().sum().backward()
+
+    ctx_grad = model.prompt_learner.ctx.grad
+    assert ctx_grad is not None
+    assert ctx_grad.norm().item() > 0

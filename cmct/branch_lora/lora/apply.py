@@ -129,7 +129,14 @@ def _apply_vit_lora(model, list_lora_layers, *, backbone_name, position, params,
                 list_lora_layers.append(new_multi_head_lora)
 
 
-def save_lora(list_lora_layers, save_dir, filename, *, r, alpha, params):
+def save_lora(list_lora_layers, save_dir, filename, *, r, alpha, params, text):
+    """`text` must be the same flag `apply_lora` was called with: it says
+    whether the text encoder was actually injected, which `metadata['encoder']`
+    below reports. Threaded through explicitly rather than inferred from
+    `list_lora_layers`'s length, since that count alone (with no position/
+    backbone info in hand here) can't unambiguously separate a vision-only
+    run from a both-towers one.
+    """
     weights = {}
     for i, layer in enumerate(list_lora_layers):
         layer_weights = {}
@@ -141,7 +148,7 @@ def save_lora(list_lora_layers, save_dir, filename, *, r, alpha, params):
     metadata = {
         'r': r,
         'alpha': alpha,
-        'encoder': 'both',
+        'encoder': 'both' if text else 'vision',
         'params': params,
         'position': 'all'
     }

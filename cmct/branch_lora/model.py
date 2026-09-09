@@ -11,7 +11,7 @@ import torch.nn as nn
 
 from cmct.clip import clip
 
-from .prompt import PromptLearner
+from .prompt import CTX_PARAM_NAME, PromptLearner
 
 
 def load_clip_to_cpu(backbone_name: str, backbone_path: str) -> nn.Module:
@@ -78,7 +78,7 @@ class LoraCLIP(nn.Module):
         # the LoRA factors afterwards; doing it here as well keeps a directly
         # constructed model self-consistent.
         for name, param in self.named_parameters():
-            if name != "prompt_learner.ctx":
+            if name != CTX_PARAM_NAME:
                 param.requires_grad_(False)
 
     def text_features(self):

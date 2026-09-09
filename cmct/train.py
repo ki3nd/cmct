@@ -33,6 +33,7 @@ from cmct.branch_lora import (
     ema_update_lora_params,
     load_clip_to_cpu,
 )
+from cmct.branch_lora.prompt import CTX_PARAM_NAME
 from cmct.branch_lora.lora import apply_lora, save_lora
 from cmct.branch_mlp import TransferNet, ema_update_teacher, prompts_for
 from cmct.config import Config, resolve, to_dassl_cfg
@@ -107,7 +108,7 @@ def build_lora_pair(config: Config, classnames, device):
         # error, the context simply never trains.
         if "lora" in name:
             param.requires_grad_(True)
-        elif name == "prompt_learner.ctx":
+        elif name == CTX_PARAM_NAME:
             param.requires_grad_(config.branch_lora.prompt.enabled)
     for param in teacher.parameters():
         param.requires_grad_(False)
@@ -610,7 +611,7 @@ def main():
                     lora_layers_teacher, osp.join(config.output_dir, "teacher_lora"),
                     filename="LoRA-last",
                     r=config.branch_lora.lora.r, alpha=config.branch_lora.lora.alpha,
-                    params=config.branch_lora.lora.params,
+                    params=config.branch_lora.lora.params, text=config.branch_lora.lora.text,
                 )
             if mlp_enabled:
                 torch.save(model_mlp.state_dict(), osp.join(config.output_dir, "model_mlp-last.pt"))
@@ -621,7 +622,7 @@ def main():
                     lora_layers_teacher, osp.join(config.output_dir, "teacher_lora"),
                     filename="LoRA-best",
                     r=config.branch_lora.lora.r, alpha=config.branch_lora.lora.alpha,
-                    params=config.branch_lora.lora.params,
+                    params=config.branch_lora.lora.params, text=config.branch_lora.lora.text,
                 )
             if mlp_enabled and acc_mlp > best_acc_mlp:
                 best_acc_mlp = acc_mlp

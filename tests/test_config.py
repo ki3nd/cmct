@@ -66,6 +66,21 @@ def test_a_non_positive_n_ctx_is_rejected(tmp_path):
         Config.from_yaml(str(p))
 
 
+def test_shared_prompt_and_self_from_teacher_together_is_rejected(tmp_path):
+    """Both true would compare two different text spaces inside one loss:
+    CMKD's self-reference stays pinned to teacher_model's hardcoded PROMPTS
+    embedding (a plain attribute ema_update_teacher's state_dict() walk can
+    never reach), while target_clip_logits and reg_loss come from
+    branch_lora's shared, live text space. Not live under the shipped config
+    (self_from_teacher is false there), but must fail loudly the moment
+    someone flips it on with shared_prompt already true."""
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace(
+        "self_from_teacher: false", "self_from_teacher: true"))
+    with pytest.raises(ValueError, match="shared_prompt"):
+        Config.from_yaml(str(p))
+
+
 def test_unknown_key_is_rejected_by_name(tmp_path):
     p = tmp_path / "bad.yaml"
     p.write_text(read_text(CONFIG_PATH) + textwrap.dedent("""

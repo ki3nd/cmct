@@ -7,7 +7,9 @@ is needed.
 
 import torch
 
-_TRACKED_SUFFIXES = ("prompt_learner.ctx",)
+from .prompt import CTX_PARAM_NAME
+
+_TRACKED_SUFFIXES = (CTX_PARAM_NAME,)
 """Non-LoRA leaves the teacher must also track.
 
 The prompt context is trained like a LoRA factor but is not named like one, and
