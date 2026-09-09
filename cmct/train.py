@@ -79,6 +79,7 @@ def build_lora_pair(config: Config, classnames, device):
         "alpha": config.branch_lora.lora.alpha,
         "dropout": config.branch_lora.lora.dropout,
         "rank_ramp": config.branch_lora.lora.rank_ramp,
+        "text": config.branch_lora.lora.text,
     }
 
     clip_student = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)

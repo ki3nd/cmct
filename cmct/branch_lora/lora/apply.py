@@ -42,18 +42,23 @@ INDEX_POSITIONS_VISION = {
 }
 
 
-def apply_lora(model, *, backbone_name, position, params, r, alpha, dropout, rank_ramp):
-    """Replace the attention modules of both CLIP encoders with LoRA versions.
+def apply_lora(model, *, backbone_name, position, params, r, alpha, dropout,
+               rank_ramp, text):
+    """Replace the attention modules of CLIP's encoders with LoRA versions.
 
     Returns the injected PlainMultiheadAttentionLoRA layers, text encoder first
-    then vision encoder, in block order.
+    then vision encoder, in block order. `text=False` skips the text encoder
+    entirely, so the returned list is vision-only and HALF AS LONG -- which
+    shifts every index `save_lora` writes. Checkpoints written under one
+    setting cannot be read back under the other.
     """
     list_lora_layers = []
-    _apply_text_lora(
-        model, list_lora_layers,
-        position=position, params=params, r=r, alpha=alpha,
-        dropout=dropout, rank_ramp=rank_ramp,
-    )
+    if text:
+        _apply_text_lora(
+            model, list_lora_layers,
+            position=position, params=params, r=r, alpha=alpha,
+            dropout=dropout, rank_ramp=rank_ramp,
+        )
     _apply_vit_lora(
         model, list_lora_layers,
         backbone_name=backbone_name, position=position, params=params, r=r,
