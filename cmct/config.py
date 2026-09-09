@@ -106,12 +106,41 @@ class LoraConfig:
     alpha: int
     dropout: float
     rank_ramp: list[int]
+    text: bool
+    """Inject LoRA into the TEXT encoder as well as the vision one.
+
+    The original design injected into both (see lora/apply.py). Setting this
+    false leaves the text tower at frozen-CLIP weights, so the only text-side
+    adaptation is `BranchLoraConfig.prompt`. The two are independent: setting
+    both stacks two adaptation mechanisms on one tower, which no shipped config
+    does but nothing here forbids."""
 
 
 @dataclass(frozen=True)
 class WarmupConfig:
     lr: float
     iters: int
+
+
+@dataclass(frozen=True)
+class PromptConfig:
+    enabled: bool
+    """Whether the context tokens receive gradients.
+
+    False is not a no-op path: the context is still built and still used, but it
+    stays at its initial value, which is the token embedding of
+    `train.LORA_PROMPT_TEMPLATE`'s prefix. So `enabled: false` reproduces the
+    hand-written-template behaviour exactly, which is what makes it a usable
+    ablation baseline."""
+
+    n_ctx: int
+    """Number of learnable context tokens, shared across all classes.
+
+    When it equals the token count of the template prefix (4 for
+    "a photo of a"), the context initialises from that prefix's embeddings and
+    `enabled: false` is bit-identical to the old template path. Any other value
+    initialises the surplus tokens from N(0, 0.02) instead, and that
+    equivalence no longer holds."""
 
 
 @dataclass(frozen=True)
@@ -125,6 +154,7 @@ class BranchLoraConfig:
     # DIFFERENT precisions, by design.
     precision: str
     lora: LoraConfig
+    prompt: PromptConfig
     lr: float
     warmup: WarmupConfig
     momentum: float
@@ -167,6 +197,10 @@ class BranchMlpConfig:
     warmup_iters: int
     cross_weight: float
     self_from_teacher: bool
+    shared_prompt: bool
+    """Read branch_lora's text embeddings for this branch's cosine head, once
+    `warmup_iters` is past. Before that this branch keeps its own hardcoded
+    prompt embeddings (branch_mlp/backbone.py's PROMPTS)."""
     ema: TeacherEmaConfig
 
 
@@ -276,6 +310,29 @@ def _validate(cfg: Config) -> None:
         raise ValueError(
             "branch_mlp.ema.hard_copy_iters has no effect under branch_mlp.ema.schedule: "
             "ramp -- remove it"
+        )
+    if cfg.branch_lora.prompt.n_ctx <= 0:
+        raise ValueError(
+            f"branch_lora.prompt.n_ctx must be positive, got {cfg.branch_lora.prompt.n_ctx}"
+        )
+    if cfg.branch_mlp.shared_prompt and not cfg.branch_lora.enabled:
+        raise ValueError(
+            "branch_mlp.shared_prompt: true needs branch_lora.enabled: true -- there is "
+            "no prompt to share otherwise, and the setting would be silently inert"
+        )
+    if cfg.branch_mlp.shared_prompt and (
+        cfg.branch_lora.backbone.name != cfg.branch_mlp.backbone.name
+    ):
+        # The branches carry independent backbone settings, and the shared text
+        # embedding has to match branch_mlp's image-feature width: 512 for
+        # ViT-B/16, 1024 for RN50. ClipBackbone.set_text_features would catch a
+        # mismatch, but only at the first push -- macro 50, after 500
+        # micro-steps of GPU time. LORA_BACKBONES and MLP_BACKBONES overlap on
+        # ViT-B/16 alone, so equal names is exactly the right rule here.
+        raise ValueError(
+            f"branch_mlp.shared_prompt: true needs both branches on the same backbone, "
+            f"got branch_lora {cfg.branch_lora.backbone.name!r} and branch_mlp "
+            f"{cfg.branch_mlp.backbone.name!r}"
         )
     if cfg.data.name not in DATASET_NAMES:
         raise ValueError(f"data.name must be one of {sorted(DATASET_NAMES)}, got {cfg.data.name!r}")

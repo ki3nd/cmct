@@ -34,6 +34,10 @@ branch_lora:
     alpha: 1
     dropout: 0.25
     rank_ramp: [2, 4, 6, 8, 10]
+    text: false             # text tower stays frozen CLIP; prompt adapts it instead
+  prompt:
+    enabled: true
+    n_ctx: 4                # matches "a photo of a" -- 4 CLIP BPE tokens
   lr: 0.0035
   warmup: {lr: 0.006, iters: 50}
   momentum: 0.9
@@ -41,7 +45,7 @@ branch_lora:
   grad_clip: 20.0
   mmd_weight: 1.0
   cross_weight: 0.5
-  ema_momentum: 0.99
+  ema_momentum: 0.0         # EMA off: teacher is an eval-mode copy of the student
 
 branch_mlp:
   enabled: true
@@ -60,8 +64,9 @@ branch_mlp:
   lamb_gamma: 1.0
   warmup_iters: 500
   cross_weight: 0.5
-  self_from_teacher: true
-  ema: {momentum: 0.99, schedule: ramp}
+  self_from_teacher: false  # CMKD self-references its own live cosine
+  shared_prompt: true       # read branch_lora's text embeddings after warmup
+  ema: {momentum: 0.99, schedule: hard_copy, hard_copy_iters: 10000}
 
 pseudo_label:
   threshold: 0.85             # CONFI, shared by both branches

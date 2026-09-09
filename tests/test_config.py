@@ -18,18 +18,52 @@ def test_shipped_config_parses_to_the_documented_effective_values():
     assert cfg.pseudo_label.threshold == 0.85
     assert cfg.branch_lora.lora.r == 2
     assert cfg.branch_lora.lora.rank_ramp == [2, 4, 6, 8, 10]
+    assert cfg.branch_lora.lora.text is False
+    assert cfg.branch_lora.prompt.enabled is True
+    assert cfg.branch_lora.prompt.n_ctx == 4
     assert cfg.branch_lora.warmup.lr == 0.006
     assert cfg.branch_lora.warmup.iters == 50
-    assert cfg.branch_lora.ema_momentum == 0.99
+    assert cfg.branch_lora.ema_momentum == 0.0
     assert cfg.branch_mlp.warmup_iters == 500
-    assert cfg.branch_mlp.self_from_teacher is True
-    assert cfg.branch_mlp.ema.schedule == "ramp"
-    assert cfg.branch_mlp.ema.hard_copy_iters is None  # inert under "ramp", so absent
+    assert cfg.branch_mlp.self_from_teacher is False
+    assert cfg.branch_mlp.shared_prompt is True
+    assert cfg.branch_mlp.ema.schedule == "hard_copy"
+    assert cfg.branch_mlp.ema.hard_copy_iters == 10000
     assert cfg.train.iters == 1000
     assert cfg.train.mlp_steps_per_iter == 10
     assert cfg.data.batch_size.source == 32
     assert cfg.data.strong_aug is False
     assert cfg.pseudo_label.debias.enabled is False
+
+
+def test_shared_prompt_needs_the_lora_branch(tmp_path):
+    # Same trick test_resolve_forces_cross_weight_to_zero_when_branch_lora_disabled
+    # uses: the FIRST "enabled: true" in the shipped yaml is branch_lora's.
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("enabled: true", "enabled: false", 1))
+    with pytest.raises(ValueError, match="shared_prompt"):
+        Config.from_yaml(str(p))
+
+
+def test_shared_prompt_needs_both_branches_on_the_same_backbone(tmp_path):
+    # branch_lora and branch_mlp have independent backbone settings, and their
+    # embedding widths differ (512 for ViT-B/16, 1024 for RN50). A mismatch
+    # would otherwise surface as a shape error at the first push -- macro 50,
+    # after 500 micro-steps of GPU time.
+    p = tmp_path / "bad.yaml"
+    text = read_text(CONFIG_PATH).replace(
+        "    name: ViT-B/16          # any CLIP backbone", "    name: RN50          # any CLIP backbone"
+    )
+    p.write_text(text)
+    with pytest.raises(ValueError, match="same backbone"):
+        Config.from_yaml(str(p))
+
+
+def test_a_non_positive_n_ctx_is_rejected(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("n_ctx: 4", "n_ctx: 0"))
+    with pytest.raises(ValueError, match="n_ctx"):
+        Config.from_yaml(str(p))
 
 
 def test_unknown_key_is_rejected_by_name(tmp_path):
@@ -44,7 +78,7 @@ def test_unknown_key_is_rejected_by_name(tmp_path):
 
 def test_invalid_ema_schedule_is_rejected(tmp_path):
     p = tmp_path / "bad.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace("schedule: ramp", "schedule: cosine"))
+    p.write_text(read_text(CONFIG_PATH).replace("schedule: hard_copy", "schedule: cosine"))
     with pytest.raises(ValueError, match="schedule"):
         Config.from_yaml(str(p))
 
@@ -67,7 +101,8 @@ def test_resolve_forces_cross_weight_to_zero_when_branch_lora_disabled(tmp_path)
     from cmct.config import resolve
 
     p = tmp_path / "disabled.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace("enabled: true", "enabled: false", 1))
+    p.write_text(read_text(CONFIG_PATH).replace("enabled: true", "enabled: false", 1)
+                 .replace("shared_prompt: true", "shared_prompt: false"))
     cfg = Config.from_yaml(str(p))
     assert cfg.branch_lora.enabled is False
     assert cfg.branch_mlp.cross_weight == 0.5  # unresolved value, unchanged by parsing
@@ -92,8 +127,8 @@ def test_unknown_key_at_a_nested_path_is_rejected_by_full_dotted_path(tmp_path):
     levels down must name where it is, not just that something is wrong."""
     p = tmp_path / "bad.yaml"
     p.write_text(read_text(CONFIG_PATH).replace(
-        "  ema: {momentum: 0.99, schedule: ramp}",
-        "  ema: {momentum: 0.99, schedule: ramp, momentom: 0.5}"))
+        "  ema: {momentum: 0.99, schedule: hard_copy, hard_copy_iters: 10000}",
+        "  ema: {momentum: 0.99, schedule: hard_copy, hard_copy_iters: 10000, momentom: 0.5}"))
     with pytest.raises(ValueError, match=r"branch_mlp\.ema\.momentom"):
         Config.from_yaml(str(p))
 
@@ -103,8 +138,7 @@ def test_missing_key_is_rejected_by_full_dotted_path(tmp_path):
     since the whole point of this layer is that every effective value is
     written down in one file."""
     p = tmp_path / "bad.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace("  schedule: ramp\n", "")
-                 .replace(", schedule: ramp", ""))
+    p.write_text(read_text(CONFIG_PATH).replace(", schedule: hard_copy", ""))
     with pytest.raises(ValueError, match=r"branch_mlp\.ema\.schedule"):
         Config.from_yaml(str(p))
 
@@ -126,7 +160,8 @@ def test_the_mlp_branch_accepts_a_resnet_backbone(tmp_path):
     then freezes."""
     p = tmp_path / "rn50.yaml"
     p.write_text(read_text(CONFIG_PATH).replace(
-        "    name: ViT-B/16          # any CLIP backbone", "    name: RN50          # any CLIP backbone"))
+        "    name: ViT-B/16          # any CLIP backbone", "    name: RN50          # any CLIP backbone")
+        .replace("shared_prompt: true", "shared_prompt: false"))
     cfg = Config.from_yaml(str(p))
     assert cfg.branch_mlp.backbone.name == "RN50"
     assert cfg.branch_lora.backbone.name == "ViT-B/16"
@@ -163,7 +198,7 @@ def test_hard_copy_iters_is_rejected_under_the_ramp_schedule(tmp_path):
     a number sit in the config file looking like it governs something."""
     p = tmp_path / "bad.yaml"
     p.write_text(read_text(CONFIG_PATH).replace(
-        "schedule: ramp}", "schedule: ramp, hard_copy_iters: 100}"))
+        "schedule: hard_copy, hard_copy_iters: 10000}", "schedule: ramp, hard_copy_iters: 100}"))
     with pytest.raises(ValueError, match="hard_copy_iters"):
         Config.from_yaml(str(p))
 
@@ -171,15 +206,14 @@ def test_hard_copy_iters_is_rejected_under_the_ramp_schedule(tmp_path):
 def test_hard_copy_iters_is_required_under_the_hard_copy_schedule(tmp_path):
     """The mirror: that schedule has no window without it."""
     p = tmp_path / "bad.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace("schedule: ramp}", "schedule: hard_copy}"))
+    p.write_text(read_text(CONFIG_PATH).replace(", hard_copy_iters: 10000", ""))
     with pytest.raises(ValueError, match="hard_copy_iters"):
         Config.from_yaml(str(p))
 
 
 def test_the_hard_copy_schedule_takes_its_own_window(tmp_path):
     p = tmp_path / "hard_copy.yaml"
-    p.write_text(read_text(CONFIG_PATH).replace(
-        "schedule: ramp}", "schedule: hard_copy, hard_copy_iters: 50}"))
+    p.write_text(read_text(CONFIG_PATH).replace("hard_copy_iters: 10000", "hard_copy_iters: 50"))
     cfg = Config.from_yaml(str(p))
     assert cfg.branch_mlp.ema.schedule == "hard_copy"
     assert cfg.branch_mlp.ema.hard_copy_iters == 50
