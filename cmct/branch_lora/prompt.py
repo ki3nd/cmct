@@ -8,7 +8,9 @@ CLIP weights.
 The context is initialised from the token embeddings of `template`'s prefix, so
 a context that never moves reproduces the hand-written template exactly. That
 property is what makes `prompt.enabled: false` a usable ablation baseline, and
-what the equivalence test in tests/test_branch_lora_prompt.py checks.
+what the equivalence test in tests/test_branch_lora_prompt.py checks. It only
+holds if `n_ctx` equals the prefix's own token count exactly -- `__init__`
+enforces that at construction time rather than silently padding or truncating.
 """
 
 import torch
@@ -21,7 +23,6 @@ class PromptLearner(nn.Module):
     def __init__(self, classnames, clip_model, *, n_ctx, template, learnable):
         super().__init__()
         dtype = clip_model.dtype
-        ctx_dim = clip_model.ln_final.weight.shape[0]
 
         # "a photo of a {}." -> "a photo of a"
         prefix_text = template.split("{}")[0].strip()
@@ -30,14 +31,19 @@ class PromptLearner(nn.Module):
         eot = int(prefix_ids.argmax())
         prefix_ids = prefix_ids[1:eot]
 
+        if prefix_ids.shape[0] != n_ctx:
+            raise ValueError(
+                f"n_ctx={n_ctx} does not match the token count of template "
+                f"{template!r}'s prefix ({prefix_ids.shape[0]} tokens). The "
+                f"context is initialised from that prefix and must replace it "
+                f"one-for-one, or prompt.enabled: false would freeze noise "
+                f"into the prompt instead of reproducing the template."
+            )
+
         with torch.no_grad():
             prefix_vectors = clip_model.token_embedding(prefix_ids).type(dtype)
 
-        ctx_vectors = torch.empty(n_ctx, ctx_dim, dtype=dtype)
-        nn.init.normal_(ctx_vectors, std=0.02)
-        take = min(n_ctx, prefix_vectors.shape[0])
-        ctx_vectors[:take] = prefix_vectors[:take]
-        self.ctx = nn.Parameter(ctx_vectors, requires_grad=learnable)
+        self.ctx = nn.Parameter(prefix_vectors.clone(), requires_grad=learnable)
 
         # Each "X" is exactly one CLIP BPE token, so the placeholders occupy
         # positions 1..n_ctx and EOT lands where it would in the real prompt
