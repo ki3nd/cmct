@@ -51,11 +51,11 @@ def test_text_lora_can_be_switched_off(clip_weights):
     # LoraCLIP's CURRENT signature -- template positional, no prompt arguments.
     # Task 3 changes it to keywords and updates this one call.
     clip_model = load_clip_to_cpu("ViT-B/16", weights_dir)
-    model = LoraCLIP(["dog", "cat"], clip_model, "a photo of a {}.")
+    model = LoraCLIP(["dog", "cat"], clip_model, template="a photo of a {}.", n_ctx=4, learnable=True)
     layers_vision_only = apply_lora(model, **kwargs, text=False)
 
     clip_model2 = load_clip_to_cpu("ViT-B/16", weights_dir)
-    model2 = LoraCLIP(["dog", "cat"], clip_model2, "a photo of a {}.")
+    model2 = LoraCLIP(["dog", "cat"], clip_model2, template="a photo of a {}.", n_ctx=4, learnable=True)
     layers_both = apply_lora(model2, **kwargs, text=True)
 
     # Both towers are 12 blocks, so injecting into one gives exactly half.

@@ -88,16 +88,27 @@ def build_lora_pair(config: Config, classnames, device):
         clip_student.float()
         clip_teacher.float()
 
-    student = LoraCLIP(classnames, clip_student, LORA_PROMPT_TEMPLATE)
-    teacher = FrozenTeacherCLIP(classnames, clip_teacher, LORA_PROMPT_TEMPLATE)
+    prompt_kwargs = {
+        "n_ctx": config.branch_lora.prompt.n_ctx,
+        "template": LORA_PROMPT_TEMPLATE,
+        "learnable": config.branch_lora.prompt.enabled,
+    }
+    student = LoraCLIP(classnames, clip_student, **prompt_kwargs)
+    teacher = FrozenTeacherCLIP(classnames, clip_teacher, **prompt_kwargs)
     lora_layers_student = apply_lora(student, **lora_kwargs)
     lora_layers_teacher = apply_lora(teacher, **lora_kwargs)
 
     for param in student.parameters():
         param.requires_grad_(False)
     for name, param in student.named_parameters():
+        # The prompt context must be trainable BEFORE optim_lora is built:
+        # torch.optim.SGD snapshots the parameter list at construction, so a
+        # requires_grad flipped later would never enter the optimizer -- no
+        # error, the context simply never trains.
         if "lora" in name:
             param.requires_grad_(True)
+        elif name == "prompt_learner.ctx":
+            param.requires_grad_(config.branch_lora.prompt.enabled)
     for param in teacher.parameters():
         param.requires_grad_(False)
 
@@ -287,7 +298,10 @@ def main():
         clip_frozen = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)
         if config.branch_lora.precision == "fp32":
             clip_frozen.float()
-        teacher_frozen = FrozenTeacherCLIP(classnames, clip_frozen, LORA_PROMPT_TEMPLATE).to(device)
+        teacher_frozen = FrozenTeacherCLIP(
+            classnames, clip_frozen, template=LORA_PROMPT_TEMPLATE,
+            n_ctx=config.branch_lora.prompt.n_ctx, learnable=False,
+        ).to(device)
         for param in teacher_frozen.parameters():
             param.requires_grad_(False)
         teacher_frozen.eval()

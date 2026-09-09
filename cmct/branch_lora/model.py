@@ -11,6 +11,8 @@ import torch.nn as nn
 
 from cmct.clip import clip
 
+from .prompt import PromptLearner
+
 
 def load_clip_to_cpu(backbone_name: str, backbone_path: str) -> nn.Module:
     url = clip._MODELS[backbone_name]
@@ -39,15 +41,16 @@ class Simple_TextEncoder(nn.Module):
         self.text_projection = clip_model.text_projection
         self.dtype = clip_model.dtype
 
-    def forward(self, text):
-        x = self.token_embedding(text).type(self.dtype)
-        x = x + self.positional_embedding.type(self.dtype)
+    def forward(self, prompts, tokenized_prompts):
+        """`prompts` is an embedding sequence (n_cls, 77, ctx_dim);
+        `tokenized_prompts` is the matching id tensor, read ONLY to locate EOT."""
+        x = prompts + self.positional_embedding.type(self.dtype)
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.ln_final(x).type(self.dtype)
 
-        x = x[torch.arange(x.shape[0]), text.argmax(dim=-1)] @ self.text_projection
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ self.text_projection
         return x
 
 
@@ -61,22 +64,36 @@ class LoraCLIP(nn.Module):
     the normalized feature to MK-MMD.
     """
 
-    def __init__(self, classnames, clip_model, template: str):
+    def __init__(self, classnames, clip_model, *, template: str, n_ctx, learnable):
         super().__init__()
         self.text_encoder = Simple_TextEncoder(clip_model)
-
         self.image_encoder = clip_model.visual
-
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
-        prompt_prefix = template
-        prompts = [prompt_prefix.format(c.replace("_", " ")) for c in classnames]
-        self.tokenized_prompts = clip.tokenize(prompts)
+        self.prompt_learner = PromptLearner(
+            classnames, clip_model, n_ctx=n_ctx, template=template, learnable=learnable,
+        )
+        # Everything except the context starts frozen. build_lora_pair re-enables
+        # the LoRA factors afterwards; doing it here as well keeps a directly
+        # constructed model self-consistent.
+        for name, param in self.named_parameters():
+            if name != "prompt_learner.ctx":
+                param.requires_grad_(False)
+
+    def text_features(self):
+        """L2-normalized text embeddings, one row per class.
+
+        Recomputed on every call: the context is a live parameter, so caching
+        would silently serve a stale embedding after an optimizer step.
+        """
+        text_features = self.text_encoder(
+            self.prompt_learner(), self.prompt_learner.tokenized_prompts
+        )
+        return text_features / text_features.norm(dim=-1, keepdim=True)
 
     def forward(self, image, normalize_feat=True):
-        text_features = self.text_encoder(self.tokenized_prompts.to(self.logit_scale.device))
-        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        text_features = self.text_features()
 
         image_features = self.image_encoder(image.type(self.dtype))
         image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
