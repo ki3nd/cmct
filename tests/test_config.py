@@ -183,3 +183,70 @@ def test_the_hard_copy_schedule_takes_its_own_window(tmp_path):
     cfg = Config.from_yaml(str(p))
     assert cfg.branch_mlp.ema.schedule == "hard_copy"
     assert cfg.branch_mlp.ema.hard_copy_iters == 50
+
+
+IMAGENET_CONFIG_PATH = "configs/officehome_a2c_imagenet.yaml"
+
+
+def test_imagenet_config_parses_with_cmkd_settings_absent():
+    cfg = Config.from_yaml(IMAGENET_CONFIG_PATH)
+    assert cfg.branch_mlp.backbone.source == "imagenet"
+    assert cfg.branch_mlp.backbone.name == "resnet50"
+    assert cfg.branch_mlp.lambdas is None
+    assert cfg.branch_mlp.lamb_gamma is None
+    assert cfg.branch_mlp.self_from_teacher is False
+    assert cfg.branch_mlp.pixel_mean == [0.485, 0.456, 0.406]
+
+
+def test_cmkd_settings_are_rejected_under_the_imagenet_source(tmp_path):
+    # Not ignored: CMKD cannot run without a cosine head, so lambdas left in
+    # the YAML would otherwise sit there looking like they were in effect.
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(IMAGENET_CONFIG_PATH).replace(
+        "  self_from_teacher: false",
+        "  self_from_teacher: false\n  lamb_gamma: 1.0",
+    ))
+    with pytest.raises(ValueError, match="lamb_gamma"):
+        Config.from_yaml(str(p))
+
+
+def test_self_from_teacher_is_rejected_under_the_imagenet_source(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(IMAGENET_CONFIG_PATH).replace(
+        "self_from_teacher: false", "self_from_teacher: true"))
+    with pytest.raises(ValueError, match="self_from_teacher"):
+        Config.from_yaml(str(p))
+
+
+def test_cmkd_settings_are_required_under_the_clip_source(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(CONFIG_PATH).replace("  lamb_gamma: 1.0\n", ""))
+    with pytest.raises(ValueError, match="lamb_gamma"):
+        Config.from_yaml(str(p))
+
+
+def test_a_clip_backbone_name_is_rejected_under_the_imagenet_source(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(IMAGENET_CONFIG_PATH).replace("name: resnet50", "name: RN50"))
+    with pytest.raises(ValueError, match="branch_mlp.backbone.name"):
+        Config.from_yaml(str(p))
+
+
+def test_branch_mlp_normalization_must_be_set_as_a_pair(tmp_path):
+    p = tmp_path / "bad.yaml"
+    p.write_text(read_text(IMAGENET_CONFIG_PATH).replace(
+        "  pixel_std:  [0.229, 0.224, 0.225]\n", ""))
+    with pytest.raises(ValueError, match="must be set together"):
+        Config.from_yaml(str(p))
+
+
+def test_branch_mlp_normalization_is_required_under_the_imagenet_source(tmp_path):
+    # Silently feeding an ImageNet backbone CLIP's statistics would not fail,
+    # it would just under-perform -- so it is rejected rather than defaulted.
+    p = tmp_path / "bad.yaml"
+    text = read_text(IMAGENET_CONFIG_PATH)
+    for line in ("  pixel_mean: [0.485, 0.456, 0.406]\n", "  pixel_std:  [0.229, 0.224, 0.225]\n"):
+        text = text.replace(line, "")
+    p.write_text(text)
+    with pytest.raises(ValueError, match="required under"):
+        Config.from_yaml(str(p))

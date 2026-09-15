@@ -1,0 +1,84 @@
+# branch_mlp on ImageNet-supervised weights instead of CLIP: a distillation
+# probe, asking what survives when the co-training partner is a weaker
+# architecture with no cross-modal prior. Differences from
+# officehome_a2c.yaml are confined to branch_mlp.
+#
+# With no cosine head there is no CMKD (lambdas/lamb_gamma/self_from_teacher
+# are rejected here, not ignored). branch_mlp's target-side signal is instead
+# two thresholded pseudo-label losses, the same shape branch_lora uses: one
+# from its own EMA teacher, one from branch_lora's teacher.
+seed: 42
+gpu: 0
+output_dir: output/cmct/officehome/a2c_imagenet
+
+data:
+  root: /kaggle/working/data
+  name: officehome
+  source: [art]
+  target: [clipart]
+  image_size: 224
+  pixel_mean: [0.48145466, 0.4578275, 0.40821073]
+  pixel_std:  [0.26862954, 0.26130258, 0.27577711]
+  batch_size: {source: 32, target: 32, test: 128}
+  num_workers: 8
+  strong_aug: false
+
+train:
+  iters: 1000
+  mlp_steps_per_iter: 10
+  print_freq: 10
+  eval_freq: 50
+
+branch_lora:
+  enabled: true
+  backbone:
+    name: ViT-B/16
+    path: ./assets
+  precision: fp16
+  lora:
+    position: all
+    params: [q, k, v]
+    r: 2
+    alpha: 1
+    dropout: 0.25
+    rank_ramp: [2, 4, 6, 8, 10]
+  lr: 0.0035
+  warmup: {lr: 0.006, iters: 50}
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  grad_clip: 20.0
+  mmd_weight: 1.0
+  cross_weight: 0.5
+  ema_momentum: 0.99
+
+branch_mlp:
+  enabled: true
+  backbone:
+    source: imagenet
+    name: resnet50
+  # ImageNet statistics, not CLIP's: this backbone was pretrained with them,
+  # and the branch has its own data loaders, so it gets its own normalization.
+  pixel_mean: [0.485, 0.456, 0.406]
+  pixel_std:  [0.229, 0.224, 0.225]
+  # Two orders of magnitude above the CLIP config's 3e-6. A supervised ResNet
+  # has no zero-shot head to protect and is being moved much further, so the
+  # CLIP fine-tuning LR would barely train it.
+  lr: 3.0e-4
+  classifier_lr_mult: 10
+  lr_gamma: 0.0003
+  lr_decay: 0.75
+  momentum: 0.9
+  weight_decay: 5.0e-4
+  nesterov: true
+  label_smoothing: 0.1
+  # Longer than the CLIP config's 500: this branch starts from a near-random
+  # head with no zero-shot prior, and both its pseudo-label losses switch on
+  # here at once.
+  warmup_iters: 1000
+  cross_weight: 0.5
+  self_from_teacher: false
+  ema: {momentum: 0.99, schedule: ramp}
+
+pseudo_label:
+  threshold: 0.85
+  debias: {enabled: false, tau: 0.5, momentum: 0.99}

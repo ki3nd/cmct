@@ -25,6 +25,7 @@ the call site (`cmct/train.py`), which owns the ordering -- see
 from vendor.dassl.data import DataManager
 
 from .transforms import build_transforms
+from .transforms import make_renormalizer as make_renormalizer
 
 
 class CyclingLoader:
@@ -49,7 +50,7 @@ class CyclingLoader:
             return next(self._it)
 
 
-def build_data_manager(cfg, *, strong_aug: bool = False):
+def build_data_manager(cfg, *, strong_aug: bool = False, pixel_mean=None, pixel_std=None):
     """Build ONE dassl `DataManager` with this project's transforms, passed as
     `custom_tfm_train` / `custom_tfm_test`. Called once per branch -- the LoRA
     branch's manager first, then the MLP branch's -- so each branch has an
@@ -57,9 +58,18 @@ def build_data_manager(cfg, *, strong_aug: bool = False):
 
     `strong_aug` is not part of dassl's own `cfg` schema, so it is threaded
     through as an explicit parameter rather than read off `cfg`.
+
+    `pixel_mean`/`pixel_std` override `cfg.INPUT`'s normalization for this
+    manager only -- a branch whose backbone was pretrained with different
+    statistics than `data.pixel_mean` needs its own. They are parameters rather
+    than `cfg` keys for the same reason `strong_aug` is: `cfg` is shared by both
+    branches, so a per-branch value cannot live on it.
     """
     crop_size = cfg.INPUT.SIZE[0]
     tfm_train, tfm_test = build_transforms(
-        crop_size, cfg.INPUT.PIXEL_MEAN, cfg.INPUT.PIXEL_STD, strong_aug=strong_aug
+        crop_size,
+        cfg.INPUT.PIXEL_MEAN if pixel_mean is None else pixel_mean,
+        cfg.INPUT.PIXEL_STD if pixel_std is None else pixel_std,
+        strong_aug=strong_aug,
     )
     return DataManager(cfg, custom_tfm_train=tfm_train, custom_tfm_test=tfm_test)

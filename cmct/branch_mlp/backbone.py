@@ -11,6 +11,7 @@ calls; it has no CPU code path.
 """
 
 import torch.nn as nn
+from torchvision import models as tv_models
 
 from cmct import clip
 
@@ -31,6 +32,10 @@ def prompts_for(dataset_name):
 
 
 class ClipBackbone(nn.Module):
+    has_cosine_head = True
+    """CLIP's text encoder gives this backbone a cosine head (`forward_head`),
+    which is what CMKD's cross-modal terms are computed against."""
+
     def __init__(self, prompts, model_name):
         super(ClipBackbone, self).__init__()
         # `model_name` is a CLIP checkpoint name, and any CLIP backbone works:
@@ -79,8 +84,56 @@ class ClipBackbone(nn.Module):
         else:
             return logits_per_image
 
+    def trainable_parameters(self):
+        return self.model.visual.parameters()
+
     def forward(self, x):
         image_features = self.forward_features(x)
         logits_per_image = self.forward_head(image_features)
 
         return logits_per_image
+
+
+IMAGENET_BACKBONES = {
+    "resnet50": (tv_models.resnet50, tv_models.ResNet50_Weights.IMAGENET1K_V1),
+}
+"""torchvision builders, keyed by the name `branch_mlp.backbone.name` accepts
+under `source: imagenet`. Kept in step with cmct/config.py's MLP_BACKBONES."""
+
+
+class ImagenetBackbone(nn.Module):
+    """A torchvision ResNet with ImageNet-supervised pretrained weights, used
+    as a bare feature extractor.
+
+    There is no text encoder here, so unlike `ClipBackbone` this has NO cosine
+    head -- `has_cosine_head` is what `TransferNet` reads to decide whether the
+    CMKD loss can run at all. Its target-side supervision comes entirely from
+    thresholded pseudo-labels applied by the training loop.
+
+    Unlike `ClipBackbone` this does not pin itself to CUDA; the caller's
+    `.to(device)` places it.
+    """
+
+    has_cosine_head = False
+
+    def __init__(self, model_name):
+        super(ImagenetBackbone, self).__init__()
+        builder, weights = IMAGENET_BACKBONES[model_name]
+        net = builder(weights=weights)
+        # The classifier head's input width, read off the backbone the same way
+        # ClipBackbone reads `visual.output_dim` -- 2048 for resnet50.
+        self.output_num = net.fc.in_features
+        # `fc` is ImageNet's own 1000-way classifier; TransferNet supplies the
+        # task head, so drop it rather than carry 2M dead parameters that the
+        # optimizer would still receive.
+        net.fc = nn.Identity()
+        self.net = net
+
+    def forward_features(self, x):
+        return self.net(x)
+
+    def trainable_parameters(self):
+        return self.net.parameters()
+
+    def forward(self, x):
+        return self.forward_features(x)

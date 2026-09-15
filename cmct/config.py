@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Any, get_type_hints
+from types import UnionType
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -21,8 +22,13 @@ from vendor.dassl.config import get_cfg_default
 LORA_BACKBONES = ("ViT-B/16", "ViT-B/32", "ViT-L/14")
 """Kept in step with branch_lora/lora/apply.py's INDEX_POSITIONS_VISION."""
 
-MLP_BACKBONES = ("ViT-B/16", "RN50", "RN101")
-"""Kept in step with branch_mlp/backbone.py's checkpoint map."""
+MLP_BACKBONES = {
+    "clip": ("ViT-B/16", "RN50", "RN101"),
+    "imagenet": ("resnet50",),
+}
+"""Backbone names branch_mlp accepts, per `branch_mlp.backbone.source`. Kept in
+step with branch_mlp/backbone.py -- CLIP's own checkpoint map for "clip", and
+IMAGENET_BACKBONES there for "imagenet"."""
 
 DATASET_NAMES = {
     "officehome": "OfficeHome",
@@ -95,7 +101,22 @@ class MlpBackboneConfig:
     CMKD loss, so it should survive a loss swap.
 
     This branch downloads through CLIP's own loader, which caches in
-    ~/.cache/clip; it has no path setting of its own."""
+    ~/.cache/clip; it has no path setting of its own.
+
+    Under `source: imagenet` none of the above applies: `name` is a torchvision
+    model name instead, and the BN note is inverted -- see `source`."""
+
+    source: str = "clip"
+    """Where the backbone's pretrained weights come from: "clip" (the default,
+    and what CMKD needs -- it is CLIP's text encoder that gives the branch a
+    cosine head) or "imagenet" (torchvision supervised weights).
+
+    "imagenet" changes what this branch IS. With no cosine head there is no
+    CMKD: the branch trains on source CE plus thresholded pseudo-labels from
+    its own EMA teacher and from the LoRA branch's teacher, making it a
+    symmetric peer of branch_lora rather than a cross-modal self-trainer. The
+    BN note above is also inverted -- `fix_bn` is not applied, so the ResNet's
+    BatchNorm adapts to the target domain."""
 
 
 @dataclass(frozen=True)
@@ -162,12 +183,22 @@ class BranchMlpConfig:
     weight_decay: float
     nesterov: bool
     label_smoothing: float
-    lambdas: Lambdas
-    lamb_gamma: float
     warmup_iters: int
     cross_weight: float
     self_from_teacher: bool
     ema: TeacherEmaConfig
+    lambdas: Lambdas | None = None
+    lamb_gamma: float | None = None
+    """CMKD's only two settings. Required under `backbone.source: clip`,
+    rejected under "imagenet", where CMKD does not run at all."""
+    pixel_mean: list[float] | None = None
+    pixel_std: list[float] | None = None
+    """Normalization for THIS branch's data loaders, overriding `data.pixel_mean`
+    /`data.pixel_std`. Set together or not at all. An ImageNet-pretrained
+    backbone expects ImageNet statistics, which are not CLIP's -- and since the
+    branches then disagree on normalization, `evaluate` is given this branch's
+    own test loader so both teachers still see the same images, each normalized
+    the way its own pretraining expects."""
 
 
 @dataclass(frozen=True)
@@ -235,9 +266,20 @@ def _build(cls, raw: Any, path: str):
             continue
         value = raw[name]
         child_path = f"{path}.{name}" if path else name
-        field_type = hints[name]
+        field_type = _unwrap_optional(hints[name])
         kwargs[name] = _build(field_type, value, child_path) if is_dataclass(field_type) else value
     return cls(**kwargs)
+
+
+def _unwrap_optional(field_type):
+    """`X | None` -> `X`. Without this an optional dataclass field would never
+    be recognized as a dataclass, so its mapping would be passed through as a
+    raw dict instead of being built."""
+    if get_origin(field_type) in (UnionType, Union):
+        args = [a for a in get_args(field_type) if a is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return field_type
 
 
 def _validate(cfg: Config) -> None:
@@ -254,10 +296,54 @@ def _validate(cfg: Config) -> None:
             f"(LoRA is injected into ViT attention blocks), got "
             f"{cfg.branch_lora.backbone.name!r}"
         )
-    if cfg.branch_mlp.backbone.name not in MLP_BACKBONES:
+    mlp_source = cfg.branch_mlp.backbone.source
+    if mlp_source not in MLP_BACKBONES:
         raise ValueError(
-            f"branch_mlp.backbone.name must be one of {sorted(MLP_BACKBONES)}, got "
+            f"branch_mlp.backbone.source must be one of {sorted(MLP_BACKBONES)}, got "
+            f"{mlp_source!r}"
+        )
+    if cfg.branch_mlp.backbone.name not in MLP_BACKBONES[mlp_source]:
+        raise ValueError(
+            f"branch_mlp.backbone.name must be one of {sorted(MLP_BACKBONES[mlp_source])} "
+            f"under branch_mlp.backbone.source: {mlp_source}, got "
             f"{cfg.branch_mlp.backbone.name!r}"
+        )
+    # CMKD runs only on a cosine head, which only the CLIP source has. Rather
+    # than let its settings sit in a config that ignores them, name them.
+    cmkd_set = cfg.branch_mlp.lambdas is not None or cfg.branch_mlp.lamb_gamma is not None
+    if mlp_source == "clip":
+        if cfg.branch_mlp.lambdas is None or cfg.branch_mlp.lamb_gamma is None:
+            raise ValueError(
+                "branch_mlp.lambdas and branch_mlp.lamb_gamma are both required under "
+                "branch_mlp.backbone.source: clip -- they are CMKD's settings"
+            )
+    else:
+        if cmkd_set:
+            raise ValueError(
+                "branch_mlp.lambdas/lamb_gamma have no effect under "
+                "branch_mlp.backbone.source: imagenet -- that backbone has no cosine "
+                "head, so CMKD does not run at all -- remove them"
+            )
+        if cfg.branch_mlp.self_from_teacher:
+            raise ValueError(
+                "branch_mlp.self_from_teacher has no effect under "
+                "branch_mlp.backbone.source: imagenet -- it selects CMKD's "
+                "self-reference, and that branch's self term is a thresholded "
+                "pseudo-label loss instead -- set it to false"
+            )
+    if (cfg.branch_mlp.pixel_mean is None) != (cfg.branch_mlp.pixel_std is None):
+        raise ValueError(
+            "branch_mlp.pixel_mean and branch_mlp.pixel_std must be set together"
+        )
+    if mlp_source == "imagenet" and cfg.branch_mlp.pixel_mean is None:
+        # Omitting them would feed an ImageNet-pretrained backbone CLIP's
+        # statistics for the whole run, and nothing would fail loudly -- the
+        # run would just under-perform. Required rather than defaulted, since
+        # the right values belong to whatever `name` is.
+        raise ValueError(
+            "branch_mlp.pixel_mean and branch_mlp.pixel_std are required under "
+            "branch_mlp.backbone.source: imagenet -- that backbone was not "
+            "pretrained with data.pixel_mean's statistics"
         )
     if cfg.branch_lora.precision not in ("fp16", "fp32"):
         raise ValueError(

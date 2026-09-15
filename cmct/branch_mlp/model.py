@@ -1,6 +1,15 @@
-"""TransferNet: CLIP backbone + a linear task head, trained with the CMKD
-loss. This is `branch_mlp`'s model -- named for its head, since the loss it
-trains against (CMKD) is meant to be swappable; see `docs/design.md`.
+"""TransferNet: a pretrained backbone + a linear task head. This is
+`branch_mlp`'s model -- named for its head, since the loss it trains against
+is meant to be swappable; see `docs/design.md`.
+
+Two backbone sources, and the source decides the loss:
+  * "clip" -- `ClipBackbone`, which carries a cosine head, so the CMKD loss
+    runs and supplies the branch's own target-side signal.
+  * "imagenet" -- `ImagenetBackbone`, which has no text encoder and therefore
+    no cosine head. CMKD cannot run at all there (its three cross-modal terms
+    all read cosine logits), so this returns a zero transfer loss and the
+    training loop supplies every target-side signal as thresholded
+    pseudo-labels instead.
 
 See NOTICE for this module's license terms.
 """
@@ -10,7 +19,7 @@ import copy
 import torch
 import torch.nn as nn
 
-from .backbone import ClipBackbone
+from .backbone import ClipBackbone, ImagenetBackbone
 from .loss import CMKD
 
 
@@ -30,13 +39,16 @@ def fix_bn(m):
        m.eval()
 
 class TransferNet(nn.Module):
-    def __init__(self, prompts, *, model_name, num_classes, label_smoothing,
-                 lambdas, lamb_gamma, max_iter):
+    def __init__(self, prompts, *, model_name, source="clip", num_classes,
+                 label_smoothing, lambdas=None, lamb_gamma=None, max_iter):
         super(TransferNet, self).__init__()
         # define the network
         # get the feature extractor and the pretrained head
         self.num_class = num_classes
-        self.base_network = ClipBackbone(prompts, model_name).cuda()
+        if source == "clip":
+            self.base_network = ClipBackbone(prompts, model_name).cuda()
+        else:
+            self.base_network = ImagenetBackbone(model_name)
         self.teacher_model = copy.deepcopy(self.base_network)
         self.teacher_model.eval()
 
@@ -48,11 +60,31 @@ class TransferNet(nn.Module):
         self.classifier_layer.apply(weights_init_classifier)
 
         # define the loss functions
-        self.cmkd = CMKD(lambdas=lambdas, lamb_gamma=lamb_gamma, max_iter=max_iter)
+        self.cmkd = (
+            CMKD(lambdas=lambdas, lamb_gamma=lamb_gamma, max_iter=max_iter)
+            if self.base_network.has_cosine_head else None
+        )
         self.clf_loss = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     def forward(self, source, target_img, source_label, *,
                 self_ref_logit_clip=None, own_pred_target_img=None):
+        if self.cmkd is None:
+            # No cosine head: source CE is the only loss computable here. Every
+            # target-side signal (self and cross pseudo-labels) is applied by
+            # the caller, so `target_img` is unused -- the single target pass
+            # below is the classifier's own prediction, on the strong view when
+            # there is one.
+            #
+            # fix_bn is deliberately NOT applied: it exists to hold a
+            # CLIP-pretrained backbone's statistics still, and freezing an
+            # ImageNet ResNet's BN to source-domain statistics is the opposite
+            # of what this branch needs -- its BN should adapt to the target.
+            source_logits = self.classifier_layer(self.base_network.forward_features(source))
+            clf_loss = self.clf_loss(source_logits, source_label)
+            own_img = target_img if own_pred_target_img is None else own_pred_target_img
+            target_logits = self.classifier_layer(self.base_network.forward_features(own_img))
+            return clf_loss, torch.zeros((), device=target_logits.device), target_logits
+
         self.base_network.apply(fix_bn)
         source = self.base_network.forward_features(source)
 
@@ -83,7 +115,7 @@ class TransferNet(nn.Module):
 
     def get_parameters(self, initial_lr=1.0, classifier_lr_mult=1.0):
         params=[
-            {'params': self.base_network.model.visual.parameters(), 'lr': initial_lr},
+            {'params': self.base_network.trainable_parameters(), 'lr': initial_lr},
             {'params': self.classifier_layer.parameters(), 'lr': classifier_lr_mult * initial_lr}
 ]
         return params

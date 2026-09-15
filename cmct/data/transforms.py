@@ -1,5 +1,6 @@
 """Image transforms used by the training and evaluation data pipelines."""
 
+import torch
 from torchvision.transforms import (
     ColorJitter,
     Compose,
@@ -52,3 +53,31 @@ def build_transforms(image_size, pixel_mean, pixel_std, strong_aug: bool):
         tfm_train_list = tfm_train
 
     return tfm_train_list, tfm_test
+
+
+def make_renormalizer(src_mean, src_std, dst_mean, dst_std, device):
+    """A function converting an ALREADY-normalized batch from one
+    normalization to another, exactly.
+
+    This exists because the two branches can normalize differently while still
+    having to cross-teach on THE SAME image. A second data loader cannot
+    deliver that: the target batches are randomly cropped and flipped, so a
+    second loader hands the teacher a different view of the image, not the same
+    one differently normalized. Undoing one normalization and applying the
+    other on the tensor itself is the only version that keeps the view fixed --
+    and it is a single affine op, so it costs nothing next to a forward pass.
+
+    Returns the identity when the two normalizations already agree, which is
+    every run where both branches share a backbone source.
+    """
+    if list(src_mean) == list(dst_mean) and list(src_std) == list(dst_std):
+        return lambda images: images
+
+    def as_tensor(values):
+        return torch.tensor(values, dtype=torch.float32, device=device).view(1, -1, 1, 1)
+
+    # x_raw = x * src_std + src_mean, then (x_raw - dst_mean) / dst_std, folded
+    # into one multiply-add so nothing is allocated per call beyond the result.
+    scale = as_tensor(src_std) / as_tensor(dst_std)
+    shift = (as_tensor(src_mean) - as_tensor(dst_mean)) / as_tensor(dst_std)
+    return lambda images: images * scale + shift

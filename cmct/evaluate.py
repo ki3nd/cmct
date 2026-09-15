@@ -5,7 +5,8 @@ from torch.nn import functional as F
 
 
 @torch.no_grad()
-def evaluate(teacher_lora, mlp_model, teacher_classifier, test_loader, device):
+def evaluate(teacher_lora, mlp_model, teacher_classifier, test_loader, device,
+             to_mlp_norm=None):
     """Both teachers look at the exact same image each batch.
 
     ONE shared dassl test loader feeds the LoRA teacher and the CMKD teacher
@@ -20,6 +21,12 @@ def evaluate(teacher_lora, mlp_model, teacher_classifier, test_loader, device):
     model, and reporting it under a second name would invite reading the two
     numbers as independent evidence. Both being absent is rejected in
     config._validate, so at least one accuracy is always real.
+
+    `to_mlp_norm` covers the one case where the two teachers cannot read the
+    same tensor: when the MLP branch normalizes differently (an
+    ImageNet-pretrained backbone), it converts each batch to that branch's
+    normalization -- see `cmct.data.make_renormalizer`. It stays the SAME
+    image either way, which is what keeps the ensemble a fair average.
     """
     lora_on = teacher_lora is not None
     mlp_on = mlp_model is not None
@@ -34,7 +41,8 @@ def evaluate(teacher_lora, mlp_model, teacher_classifier, test_loader, device):
             correct_lora += (prob_lora.argmax(dim=-1) == label).sum().item()
 
         if mlp_on:
-            feat_mlp_teacher = mlp_model.teacher_model.forward_features(image)
+            image_mlp = image if to_mlp_norm is None else to_mlp_norm(image)
+            feat_mlp_teacher = mlp_model.teacher_model.forward_features(image_mlp)
             logits_mlp = teacher_classifier(feat_mlp_teacher)
             prob_mlp = F.softmax(logits_mlp, dim=-1)
             correct_mlp += (prob_mlp.argmax(dim=-1) == label).sum().item()
