@@ -34,19 +34,13 @@ from cmct.branch_lora import (
     load_clip_to_cpu,
 )
 from cmct.branch_lora.lora import apply_lora, save_lora
-from cmct.branch_mlp import TransferNet, ema_update_teacher, prompts_for
+from cmct.branch_mlp import TransferNet, ema_update_teacher
 from cmct.config import Config, resolve, to_dassl_cfg
 from cmct.data import CyclingLoader, build_data_manager
 from cmct.evaluate import evaluate
 from cmct.losses import DebiasTracker, masked_cross_entropy, mk_mmd
+from cmct.prompts import prompts_for
 from vendor.dassl.utils import mkdir_if_missing, set_random_seed
-
-# The LoRA branch's prompt: every dataset this entry point supports maps to
-# this one template. branch_mlp uses its own separate hardcoded prompt lists
-# (cmct/branch_mlp/backbone.py) -- the two are deliberately different and must
-# not be conflated.
-LORA_PROMPT_TEMPLATE = "a photo of a {}."
-
 
 
 def ema_momentum_at(step: int, momentum: float, schedule: str,
@@ -66,7 +60,28 @@ def ema_momentum_at(step: int, momentum: float, schedule: str,
     return min(step / (step + 1), momentum)
 
 
-def build_lora_pair(config: Config, classnames, device):
+def _squashed(text: str) -> str:
+    """Lower-cased, with everything but letters and digits dropped."""
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def misaligned_prompts(prompts, classnames):
+    """The (index, prompt, classname) triples where the prompt does not name
+    its class -- empty when the hardcoded list is in dassl's label order.
+
+    Compared with separators and case stripped from BOTH sides. dassl is not
+    consistent about class-name spelling -- office_home.py and domainnet.py
+    lower-case it, office31.py passes the directory name through raw -- so
+    Office-31's "back_pack" has to match "a photo of a backpack". Ordering
+    drift, which is what this is for, still shows up.
+    """
+    return [
+        (i, p, c) for i, (p, c) in enumerate(zip(prompts, classnames))
+        if not _squashed(p).endswith(_squashed(c))
+    ]
+
+
+def build_lora_pair(config: Config, prompts, device):
     """The LoRA student and its frozen EMA teacher.
 
     Supports ViT backbones only.
@@ -87,8 +102,8 @@ def build_lora_pair(config: Config, classnames, device):
         clip_student.float()
         clip_teacher.float()
 
-    student = LoraCLIP(classnames, clip_student, LORA_PROMPT_TEMPLATE)
-    teacher = FrozenTeacherCLIP(classnames, clip_teacher, LORA_PROMPT_TEMPLATE)
+    student = LoraCLIP(prompts, clip_student)
+    teacher = FrozenTeacherCLIP(prompts, clip_teacher)
     lora_layers_student = apply_lora(student, **lora_kwargs)
     lora_layers_teacher = apply_lora(teacher, **lora_kwargs)
 
@@ -172,42 +187,41 @@ def main():
     classnames = dm_lora.dataset.classnames
     num_classes = dm_lora.num_classes
 
-    # Only branch_mlp reads these prompts, so a LoRA-only run neither needs
-    # them nor should be stopped by them.
-    if mlp_enabled:
-        # The CMKD branch prompts CLIP with a per-dataset list of literal strings
-        # (branch_mlp/backbone.py), and nothing in the code makes that list agree
-        # with the order dassl assigns labels in. If they ever diverged, that
-        # branch's cosine logits would be silently mislabelled and every test would
-        # still pass -- no unit test can catch it, because dassl sorts the CASED
-        # directory names ("TV" < "Table") and a synthetic test tree cannot
-        # reconstruct the real ones. So assert it here, against the dataset
-        # actually on disk, before any GPU time is spent. This also catches a
-        # partly-downloaded dataset, which would otherwise surface as a shape
-        # mismatch deep inside CMKD.forward.
-        prompts = prompts_for(config.data.name)
-        if len(prompts) != num_classes:
-            raise RuntimeError(
-                f"branch_mlp has {len(prompts)} prompts for '{config.data.name}' but the "
-                f"dataset at {config.data.root} yielded {num_classes} classes -- a partly "
-                f"downloaded dataset, or the wrong data.name"
-            )
-        misaligned = [
-            (i, p, c) for i, (p, c) in enumerate(zip(prompts, classnames))
-            if not p.endswith(c.replace("_", " "))
-        ]
-        if misaligned:
-            i, prompt, classname = misaligned[0]
-            raise RuntimeError(
-                f"branch_mlp's prompt list is out of order with dassl's classnames: "
-                f"at index {i} the prompt is {prompt!r} but the class is {classname!r} "
-                f"({len(misaligned)} of {num_classes} misaligned)"
-            )
+    # ONE prompt list, built once and handed to BOTH branches' text side --
+    # branch_lora's text encoder and branch_mlp's cosine head. branch_lora used
+    # to build its own from a template of its own, so the two branches prompted
+    # CLIP with different words for the same class.
+    #
+    # The list is literal text (cmct/prompts.py) and nothing in the code makes
+    # it agree with the order dassl assigns labels in. If they ever diverged,
+    # BOTH branches' cosine logits would be silently mislabelled and every test
+    # would still pass -- no unit test can catch it, because dassl sorts the
+    # CASED directory names ("TV" < "Table") and a synthetic test tree cannot
+    # reconstruct the real ones. So assert it here, against the dataset actually
+    # on disk, before any GPU time is spent. This also catches a partly-
+    # downloaded dataset, which would otherwise surface as a shape mismatch deep
+    # inside CMKD.forward. Unlike before, this runs for a LoRA-only run too:
+    # that branch now depends on the same list.
+    prompts = prompts_for(config.data.name)
+    if len(prompts) != num_classes:
+        raise RuntimeError(
+            f"cmct has {len(prompts)} prompts for '{config.data.name}' but the "
+            f"dataset at {config.data.root} yielded {num_classes} classes -- a partly "
+            f"downloaded dataset, or the wrong data.name"
+        )
+    misaligned = misaligned_prompts(prompts, classnames)
+    if misaligned:
+        i, prompt, classname = misaligned[0]
+        raise RuntimeError(
+            f"the prompt list is out of order with dassl's classnames: "
+            f"at index {i} the prompt is {prompt!r} but the class is {classname!r} "
+            f"({len(misaligned)} of {num_classes} misaligned)"
+        )
 
     if lora_enabled:
         print("Building the LoRA branch's student/teacher")
         student_lora, teacher_lora, _, lora_layers_teacher = build_lora_pair(
-            config, classnames, device
+            config, prompts, device
         )
     else:
         student_lora, teacher_lora, lora_layers_teacher = None, None, None
@@ -224,7 +238,7 @@ def main():
 
         print("Building the CMKD branch's TransferNet")
         model_mlp = TransferNet(
-            prompts_for(config.data.name),
+            prompts,
             model_name=config.branch_mlp.backbone.name,
             num_classes=num_classes,
             label_smoothing=config.branch_mlp.label_smoothing,
@@ -286,7 +300,7 @@ def main():
         clip_frozen = load_clip_to_cpu(config.branch_lora.backbone.name, config.branch_lora.backbone.path)
         if config.branch_lora.precision == "fp32":
             clip_frozen.float()
-        teacher_frozen = FrozenTeacherCLIP(classnames, clip_frozen, LORA_PROMPT_TEMPLATE).to(device)
+        teacher_frozen = FrozenTeacherCLIP(prompts, clip_frozen).to(device)
         for param in teacher_frozen.parameters():
             param.requires_grad_(False)
         teacher_frozen.eval()

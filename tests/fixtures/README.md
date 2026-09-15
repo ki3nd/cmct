@@ -25,8 +25,8 @@ investigate the code, not to refresh the fixture.
   masked cross-entropy against a pseudo-label, used by `tests/test_losses.py`.
 - `mk_mmd.json` -- `mk_mmd` in `cmct/losses.py`: multi-kernel MMD between a
   source and target feature batch, used by `tests/test_losses.py`.
-- `prompts.json` -- the per-dataset class-prompt literals in
-  `cmct/branch_mlp/backbone.py`, used by `tests/test_branch_mlp.py` to catch
-  any drift between the hardcoded prompt order and the dataset's class order.
+- `prompts.json` -- the per-dataset class-prompt literals in `cmct/prompts.py`
+  (both branches read them), used by `tests/test_prompts.py` to catch any drift
+  between the hardcoded prompt order and the dataset's class order.
 - `rank_ramp.json` -- `compute_rank` in `cmct/branch_lora/lora/apply.py`: the
   depth-dependent LoRA rank ramp, used by `tests/test_branch_lora.py`.

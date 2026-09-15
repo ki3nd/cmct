@@ -1,33 +1,7 @@
-
 import torch
 
-from cmct.branch_mlp.backbone import PROMPTS, prompts_for
 from cmct.branch_mlp.loss import CMKD, LambdaScheduler
 from tests.conftest import load_fixture
-
-# cmct's dataset name -> the spelling the frozen prompt fixture is keyed by.
-PROMPT_FIXTURE_KEYS = {
-    "officehome": "office_home",
-    "visda17": "visda",
-    "digits": "digits",
-    "office31": "office31",
-    "domainnet": "domain_net",
-    "imageclef": "image_clef",
-}
-
-
-def test_prompt_literals_match_the_frozen_baseline():
-    """The prompt lists are not derived from the dataset -- nothing in the
-    code makes them agree with the class names. If they ever drifted, the
-    branch_mlp cosine logits would be silently mislabelled, so pin them
-    against a frozen baseline (tests/fixtures/prompts.json; see
-    tests/fixtures/README.md) rather than trusting the literals to stay in
-    sync with themselves."""
-    baseline = load_fixture("prompts.json")
-    assert set(baseline) == set(PROMPT_FIXTURE_KEYS.values())
-    for name, fixture_key in PROMPT_FIXTURE_KEYS.items():
-        assert prompts_for(name) == baseline[fixture_key], name
-    assert set(PROMPTS) == set(PROMPT_FIXTURE_KEYS)
 
 
 def test_lambda_schedule_matches_the_frozen_baseline():

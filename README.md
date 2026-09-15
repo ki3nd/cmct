@@ -39,12 +39,12 @@ Images must live under `<data.root>/office_home/<domain>/<Class_Name>/*.jpg`,
 one directory per domain: `art`, `clipart`, `product`, `real_world`.
 
 Class directories are discovered by listing and sorting them with a
-case-sensitive ASCII sort. `branch_mlp`'s class-prompt list is hardcoded and
-must line up with that exact order -- for example `TV` sorts before `Table`,
+case-sensitive ASCII sort. The class-prompt list (`cmct/prompts.py`, shared by
+both branches) is hardcoded and must line up with that exact order -- for example `TV` sorts before `Table`,
 since uppercase letters precede lowercase in ASCII.
 
 Two things guard this, and it is worth knowing exactly what each covers.
-`tests/test_branch_mlp.py` checks the hardcoded prompt list against a frozen
+`tests/test_prompts.py` checks the hardcoded prompt list against a frozen
 baseline fixture, and `tests/test_dassl_dataset.py` checks that class
 discovery really does sort case-sensitively. Neither compares the prompt list
 against the dataset actually on disk -- a synthetic test tree cannot

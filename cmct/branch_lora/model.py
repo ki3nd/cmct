@@ -4,6 +4,10 @@
 runs CLIP's transformer over tokenized prompts; `LoraCLIP` wraps the image and
 text encoders into a single cosine-similarity classifier; `FrozenTeacherCLIP`
 is the EMA teacher variant that must stay in eval mode unconditionally.
+
+`LoraCLIP` takes a ready prompt list rather than class names and a template of
+its own: that list comes from `cmct/prompts.py` and is the same one branch_mlp's
+cosine head gets, so both branches prompt CLIP with identical words.
 """
 
 import torch
@@ -61,7 +65,7 @@ class LoraCLIP(nn.Module):
     the normalized feature to MK-MMD.
     """
 
-    def __init__(self, classnames, clip_model, template: str):
+    def __init__(self, prompts, clip_model):
         super().__init__()
         self.text_encoder = Simple_TextEncoder(clip_model)
 
@@ -70,8 +74,6 @@ class LoraCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
-        prompt_prefix = template
-        prompts = [prompt_prefix.format(c.replace("_", " ")) for c in classnames]
         self.tokenized_prompts = clip.tokenize(prompts)
 
     def forward(self, image, normalize_feat=True):

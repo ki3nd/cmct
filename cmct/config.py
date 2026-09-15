@@ -14,9 +14,9 @@ import yaml
 
 from vendor.dassl.config import get_cfg_default
 
-# miniDomainNet is deliberately excluded: cmct/branch_mlp/backbone.py carries
-# hardcoded prompt lists for officehome, office31, visda17 and domainnet only,
-# so accepting "minidomainnet" here would only defer a KeyError to deep inside
+# miniDomainNet is deliberately excluded: cmct/prompts.py carries hardcoded
+# prompt lists for officehome, office31, visda17 and domainnet only, so
+# accepting "minidomainnet" here would only defer a KeyError to deep inside
 # model construction. Rejecting it at config-parse time is strictly better.
 LORA_BACKBONES = ("ViT-B/16", "ViT-B/32", "ViT-L/14")
 """Kept in step with branch_lora/lora/apply.py's INDEX_POSITIONS_VISION."""
