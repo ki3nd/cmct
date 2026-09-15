@@ -46,3 +46,13 @@ def read_text(path):
     """Read a whole text file. Used by config tests that mutate the shipped YAML."""
     with open(path) as f:
         return f.read()
+
+
+@pytest.fixture(scope="session")
+def imagenet_weights():
+    """torchvision's ResNet-50 checkpoint, needed by tests that build the
+    ImageNet backbone. Skipped rather than downloaded, like `clip_weights`."""
+    path = Path.home() / ".cache" / "torch" / "hub" / "checkpoints" / "resnet50-0676ba61.pth"
+    if not path.is_file():
+        pytest.skip(f"torchvision ResNet-50 weights not found at {path}")
+    return str(path)

@@ -446,10 +446,14 @@ def main():
                             # cosine branch is computed OUTSIDE TransferNet's own
                             # forward().
                             self_ref_logit_clip = debias_mlp.correct(self_ref_logit_clip)
+                # Under the ImageNet source in warmup, BOTH target-side losses
+                # below are zero, so the target logits would be computed and
+                # then held unreachable by backward() -- see TransferNet.forward.
                 clf_loss, transfer_loss, target_logits_mlp = model_mlp(
                     data_x_mlp, data_u_mlp, label_x_mlp,
                     self_ref_logit_clip=self_ref_logit_clip,
                     own_pred_target_img=(data_u_mlp_strong if config.data.strong_aug else None),
+                    need_target_logits=mlp_is_clip or not in_warmup_mlp,
                 )
                 loss_mlp_base = clf_loss + transfer_loss
 

@@ -129,3 +129,25 @@ def test_self_reference_actually_changes_the_loss_once_lamb_is_nonzero():
             assert got_live != got_self, (
                 f"step {i}: self-reference had no effect on the loss")
             assert abs((got_self - got_live) - (self_ref[i] - live[i])) < 1e-9, i
+
+
+def test_the_warmup_step_skips_the_target_forward(imagenet_weights):
+    """Under the ImageNet source in warmup, both target-side losses are zero,
+    so nothing backward() traverses reaches the target forward's graph and its
+    saved tensors are never freed -- a whole backbone pass staying resident on
+    top of branch_lora's peak, which is what put a T4 over its 14.5 GiB. The
+    caller says so with need_target_logits=False; the pass must then not run."""
+    from cmct.branch_mlp import TransferNet
+
+    model = TransferNet(None, model_name="resnet50", source="imagenet", num_classes=5,
+                        label_smoothing=0.1, max_iter=100)
+    model.base_network.train()
+    model.classifier_layer.train()
+    src, tgt = torch.randn(4, 3, 64, 64), torch.randn(4, 3, 64, 64)
+    label = torch.randint(0, 5, (4,))
+
+    clf_loss, transfer_loss, target_logits = model(src, tgt, label, need_target_logits=False)
+
+    assert target_logits is None
+    assert transfer_loss.item() == 0.0
+    clf_loss.backward()  # the source pass is still the trainable one

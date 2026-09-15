@@ -67,7 +67,19 @@ class TransferNet(nn.Module):
         self.clf_loss = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     def forward(self, source, target_img, source_label, *,
-                self_ref_logit_clip=None, own_pred_target_img=None):
+                self_ref_logit_clip=None, own_pred_target_img=None,
+                need_target_logits=True):
+        # need_target_logits is read ONLY on the no-cosine-head path, and it is
+        # about memory, not about compute. There, the target forward exists
+        # solely to feed the caller's pseudo-label losses; during that branch's
+        # warmup those are both zero, so nothing backward() traverses reaches
+        # this graph and its saved tensors are never freed -- a whole backbone
+        # pass stays resident for the rest of the macro-step, on top of
+        # branch_lora's own peak. Returning None instead is what keeps the
+        # warmup step's footprint honest.
+        #
+        # The CMKD path ignores it: there `target_logits` feeds the loss
+        # computed right here, so it is never optional.
         if self.cmkd is None:
             # No cosine head: source CE is the only loss computable here. Every
             # target-side signal (self and cross pseudo-labels) is applied by
@@ -81,9 +93,12 @@ class TransferNet(nn.Module):
             # of what this branch needs -- its BN should adapt to the target.
             source_logits = self.classifier_layer(self.base_network.forward_features(source))
             clf_loss = self.clf_loss(source_logits, source_label)
+            zero = torch.zeros((), device=source_logits.device)
+            if not need_target_logits:
+                return clf_loss, zero, None
             own_img = target_img if own_pred_target_img is None else own_pred_target_img
             target_logits = self.classifier_layer(self.base_network.forward_features(own_img))
-            return clf_loss, torch.zeros((), device=target_logits.device), target_logits
+            return clf_loss, zero, target_logits
 
         self.base_network.apply(fix_bn)
         source = self.base_network.forward_features(source)
