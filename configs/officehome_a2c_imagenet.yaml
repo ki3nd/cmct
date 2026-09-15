@@ -71,10 +71,10 @@ branch_mlp:
   weight_decay: 5.0e-4
   nesterov: true
   label_smoothing: 0.1
-  # Longer than the CLIP config's 500: this branch starts from a near-random
-  # head with no zero-shot prior, and both its pseudo-label losses switch on
-  # here at once.
-  warmup_iters: 1000
+  # Same as the CLIP config: 500 cmkd steps = 50 macro steps
+  # (train.mlp_steps_per_iter: 10), matching branch_lora.warmup.iters so both
+  # branches' warmups end at the same macro step.
+  warmup_iters: 500
   cross_weight: 0.5
   self_from_teacher: false
   ema: {momentum: 0.99, schedule: ramp}
