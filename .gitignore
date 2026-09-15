@@ -8,3 +8,5 @@ output/
 assets/
 traces/
 .superpowers/
+docs/
+.codegraph/
