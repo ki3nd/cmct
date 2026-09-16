@@ -10,11 +10,12 @@ Two branches train side by side, each teaching the other:
     its own EMA teacher.
   * branch_mlp -- a learned head on a pretrained backbone,
     `train.mlp_steps_per_iter` inner steps per macro-step, its own EMA teacher
-    (backbone plus a separate head). `branch_mlp.backbone.source` decides how
-    it trains: "clip" gives it a cosine head and the CMKD self-training loss;
-    "imagenet" gives it neither, and its target-side signal is a pair of
-    thresholded pseudo-label losses instead -- one from its own EMA teacher,
-    one from branch_lora's.
+    (backbone plus a separate head). Both sources train on the CMKD
+    self-training loss; `branch_mlp.backbone.source` decides what CMKD
+    references. "clip" gives the branch its own cosine head, so CMKD runs in
+    full against it. "imagenet" gives it none, so CMKD references branch_lora's
+    teacher instead and drops its reg term. Either way a thresholded
+    cross-teaching loss from branch_lora's teacher is added after warmup.
 
 Usage:
     python -m cmct.train --config configs/officehome_a2c.yaml \\
@@ -123,12 +124,11 @@ def main():
     config = resolve(Config.from_yaml(args.config))
     lora_enabled = config.branch_lora.enabled
     mlp_enabled = config.branch_mlp.enabled
-    # branch_mlp's backbone source decides what that branch IS, not just which
-    # weights it starts from: "clip" gives it a cosine head and the CMKD loss,
-    # "imagenet" gives it neither, and its target-side signal becomes a pair of
-    # thresholded pseudo-label losses (its own EMA teacher, and the LoRA
-    # teacher) -- the same shape as branch_lora's. Read as a flag here because
-    # three separate places below branch on it.
+    # branch_mlp's backbone source decides where CMKD's cross-modal reference
+    # comes from, not just which weights the branch starts from: "clip" gives
+    # it a cosine head of its own and the full CMKD loss, "imagenet" gives it
+    # none, so CMKD references the LoRA teacher and reg_loss is dropped. Read
+    # as a flag here because several places below branch on it.
     mlp_is_clip = config.branch_mlp.backbone.source == "clip"
     # Each branch's own normalization. They differ only when branch_mlp's
     # backbone was pretrained with statistics other than data.pixel_mean's.
@@ -147,7 +147,7 @@ def main():
               "no LoRA teacher exists to cross-teach with")
     if not mlp_enabled:
         print("branch_mlp.enabled is false: branch_lora.cross_weight is 0.0 -- "
-              "no CMKD teacher exists to cross-teach with. The LoRA branch still "
+              "no branch_mlp teacher exists to cross-teach with. The LoRA branch still "
               "trains on source CE, self-distillation from its own EMA teacher "
               "(zero-shot CLIP during warmup) and MK-MMD.")
     print(f"Resolved config ({args.config}):")
@@ -329,10 +329,11 @@ def main():
     # pseudo_label.debias: two INDEPENDENT trackers, one per branch. The LoRA
     # one covers teacher_frozen (the warmup self-reference) and teacher_lora
     # (the self-reference post-warmup, and the cross-reference to the CMKD
-    # branch); the branch_mlp one covers that branch's own self-reference --
-    # under the CLIP source, its teacher's cosine branch, and only when
-    # branch_mlp.self_from_teacher is set; under the ImageNet source, its
-    # teacher's classifier output, which is that branch's only self signal.
+    # branch); the branch_mlp one covers that branch's own self-reference,
+    # which exists only under the CLIP source with branch_mlp.self_from_teacher
+    # set -- its teacher's cosine branch. Under the ImageNet source CMKD's
+    # reference is the LoRA teacher, so it goes through debias_lora and this
+    # tracker is never read.
     use_debias = config.pseudo_label.debias.enabled
     debias_lora = DebiasTracker(
         num_classes, config.pseudo_label.debias.tau,
@@ -413,7 +414,7 @@ def main():
                 label_x_mlp = batch_x_mlp["label"].to(device)
                 data_u_mlp = batch_u_mlp["img"].to(device)
                 # weak (data_u_mlp) feeds every TEACHER-side computation below
-                # (self-reference, reg_loss, cross-reference to the LoRA teacher)
+                # (CMKD's reference, reg_loss, cross-reference to the LoRA teacher)
                 # -- unchanged. strong feeds ONLY the classifier's own prediction
                 # (own_pred_target_img below), which costs an EXTRA full-gradient
                 # backbone forward pass here.
@@ -426,15 +427,42 @@ def main():
                 # directly instead.
                 model_mlp.base_network.train()
                 model_mlp.classifier_layer.train()
+
+                # ONE teacher_lora pass on this branch's target batch, with TWO
+                # consumers below: CMKD's cross-modal reference under the
+                # ImageNet source, and the cross-teaching term under either
+                # source. Under "imagenet" it runs during warmup too -- CMKD
+                # needs it from step 0, and the teacher has not drifted far
+                # from zero-shot CLIP by then, so its predictions are worth
+                # having. Under "clip" nothing reads it before warmup ends, and
+                # running it anyway would not merely waste a CLIP forward: it
+                # would feed debias_lora extra updates and shift that run.
+                #
+                # debias_lora, not debias_mlp: this IS the LoRA branch's
+                # prediction, the same tracker the cross term uses.
+                prob_cross_mlp = None
+                logits_lora_on_u_mlp = None
+                if lora_enabled and not (mlp_is_clip and in_warmup_mlp):
+                    with torch.no_grad():
+                        logits_lora_on_u_mlp, _ = teacher_lora(to_lora_norm(data_u_mlp))
+                        if use_debias:
+                            logits_lora_on_u_mlp = debias_lora.correct(logits_lora_on_u_mlp)
+                        prob_cross_mlp = F.softmax(logits_lora_on_u_mlp, dim=-1)
                 # TransferNet.forward() returns target_logits alongside clf_loss
-                # (label_smoothing baked in) and transfer_loss, the full CMKD
-                # self-training loss (task_loss + distill_loss + reg_loss) -- no
-                # teacher/EMA involved in it by default (the real CMKD design),
-                # UNLESS branch_mlp.self_from_teacher is set.
-                # Under the ImageNet source there is no cosine head and no CMKD:
-                # transfer_loss comes back zero and this stays None.
+                # (label_smoothing baked in) and transfer_loss, the CMKD
+                # self-training loss.
+                #
+                # What CMKD takes as its cross-modal reference differs by
+                # source. Under "clip" it is the branch's OWN cosine head --
+                # live by default (the real CMKD design), or its EMA teacher's
+                # when branch_mlp.self_from_teacher is set -- and reg_loss runs
+                # on top. Under "imagenet" there is no cosine head at all: the
+                # reference is the LoRA branch's teacher, computed above, and
+                # reg_loss is dropped.
                 self_ref_logit_clip = None
-                if config.branch_mlp.self_from_teacher:
+                if not mlp_is_clip:
+                    self_ref_logit_clip = logits_lora_on_u_mlp
+                elif config.branch_mlp.self_from_teacher:
                     with torch.no_grad():
                         teacher_feat_u_mlp = model_mlp.teacher_model.forward_features(data_u_mlp)
                         self_ref_logit_clip = model_mlp.teacher_model.forward_head(teacher_feat_u_mlp).detach()
@@ -446,44 +474,17 @@ def main():
                             # cosine branch is computed OUTSIDE TransferNet's own
                             # forward().
                             self_ref_logit_clip = debias_mlp.correct(self_ref_logit_clip)
-                # Under the ImageNet source in warmup, BOTH target-side losses
-                # below are zero, so the target logits would be computed and
-                # then held unreachable by backward() -- see TransferNet.forward.
+                # With branch_lora off there is no reference under the ImageNet
+                # source, so EVERY target-side loss is zero and the target
+                # logits would be computed and then held unreachable by
+                # backward() -- see TransferNet.forward.
                 clf_loss, transfer_loss, target_logits_mlp = model_mlp(
                     data_x_mlp, data_u_mlp, label_x_mlp,
                     self_ref_logit_clip=self_ref_logit_clip,
                     own_pred_target_img=(data_u_mlp_strong if config.data.strong_aug else None),
-                    need_target_logits=mlp_is_clip or not in_warmup_mlp,
+                    need_target_logits=mlp_is_clip or lora_enabled,
                 )
                 loss_mlp_base = clf_loss + transfer_loss
-
-                # The ImageNet source's self term, and ONLY that source's: with
-                # CMKD gone, nothing else teaches this branch from its own
-                # history, which is what keeps it a peer of branch_lora rather
-                # than a pure student of it. Deliberately the same shape as
-                # branch_lora's self loss -- its own EMA teacher's prediction,
-                # thresholded at the shared `confi`, hard-label CE -- so the two
-                # branches differ in pretraining, not in training rule. Gated by
-                # the warmup for the same reason the cross term is: before it
-                # ends the teacher has only ever seen source data.
-                #
-                # Unlike branch_lora there is no zero-shot model to bootstrap
-                # from, so early on this IS source-only self-training. The
-                # threshold is what holds it back (few target samples clear it
-                # at first, so the mask acts as its own ramp); what the
-                # threshold cannot catch is confident-but-wrong, which would
-                # show up as acc_mlp stalling while acc_lora keeps climbing.
-                if mlp_is_clip or in_warmup_mlp:
-                    loss_mlp_self = torch.tensor(0.0, device=device)
-                else:
-                    with torch.no_grad():
-                        feat_self_mlp = model_mlp.teacher_model.forward_features(data_u_mlp)
-                        logits_self_mlp = teacher_classifier(feat_self_mlp)
-                        if use_debias:
-                            logits_self_mlp = debias_mlp.correct(logits_self_mlp)
-                        prob_self_mlp = F.softmax(logits_self_mlp, dim=-1)
-                    loss_mlp_self = masked_cross_entropy(target_logits_mlp, prob_self_mlp, confi)
-                loss_mlp_base = loss_mlp_base + loss_mlp_self
 
                 if in_warmup_mlp or not lora_enabled:
                     loss_mlp_cross = torch.tensor(0.0, device=device)
@@ -496,11 +497,6 @@ def main():
                     # mutated classifier_layer's BatchNorm1d running stats an extra
                     # time regardless of the cross weight's value. Neither concern
                     # applies anymore -- target_logits_mlp is free.
-                    with torch.no_grad():
-                        logits_lora_on_u_mlp, _ = teacher_lora(to_lora_norm(data_u_mlp))
-                        if use_debias:
-                            logits_lora_on_u_mlp = debias_lora.correct(logits_lora_on_u_mlp)
-                        prob_cross_mlp = F.softmax(logits_lora_on_u_mlp, dim=-1)
                     loss_mlp_cross = masked_cross_entropy(target_logits_mlp, prob_cross_mlp, confi)
                     loss_mlp = loss_mlp_base + config.branch_mlp.cross_weight * loss_mlp_cross
 
@@ -611,7 +607,7 @@ def main():
                     model_mlp.base_network.train()
                 segments.append(
                     f"loss_mlp {loss_mlp.item():.4f} (clf {clf_loss.item():.4f} "
-                    f"transfer {transfer_loss.item():.4f} self {loss_mlp_self.item():.4f} "
+                    f"transfer {transfer_loss.item():.4f} "
                     f"cross {loss_mlp_cross.item():.4f}) acc_x_mlp {acc_x_mlp:.2f}"
                 )
             print(f"{header} " + " | ".join(segments))

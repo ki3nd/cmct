@@ -55,8 +55,19 @@ class CMKD(nn.Module):
         # the LIVE cosine branch regardless of what self-reference is used.
         # Defaults to target_logit_clip itself, i.e. the original behavior
         # (own live cosine branch as its own self-reference) when omitted.
+        #
+        # target_logit_clip/source_logit_clip may be None together: that is the
+        # backbone with NO cosine head (branch_mlp's ImageNet source), where
+        # both reg terms are uncomputable and reg_loss is dropped. The
+        # self-reference then comes from outside the branch entirely -- the
+        # LoRA branch's teacher -- and cannot be defaulted, so it is required.
+        no_cosine_head = target_logit_clip is None
+        if no_cosine_head and self_ref_logit_clip is None:
+            raise ValueError(
+                "self_ref_logit_clip is required when target_logit_clip is None: "
+                "with no cosine head there is nothing to fall back to"
+            )
         target_pred = F.softmax(target_logit, dim=1)
-        target_pred_clip = F.softmax(target_logit_clip,dim=-1)
         self_ref_clip = target_logit_clip if self_ref_logit_clip is None else self_ref_logit_clip
         target_pred_self_ref = F.softmax(self_ref_clip, dim=-1)
         coe = self.calibrated_coefficient(target_pred, target_pred_self_ref)
@@ -64,7 +75,11 @@ class CMKD(nn.Module):
         lamb = self.lamb.lamb()
         task_loss = self.lambda1 * lamb * self.gini_impurity(target_pred,coe)
         distill_loss = self.lambda1 * lamb *self.gini_impurity(target_pred_mix,1-coe)
-        reg_loss = self.regularization_term(target_pred_clip, source_logit_clip, source_label,lamb)
+        if no_cosine_head:
+            reg_loss = torch.zeros((), device=target_logit.device)
+        else:
+            target_pred_clip = F.softmax(target_logit_clip,dim=-1)
+            reg_loss = self.regularization_term(target_pred_clip, source_logit_clip, source_label,lamb)
         self.lamb.step()
         return task_loss + distill_loss + reg_loss
 

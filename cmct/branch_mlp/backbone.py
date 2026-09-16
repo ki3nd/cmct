@@ -34,7 +34,7 @@ def prompts_for(dataset_name):
 class ClipBackbone(nn.Module):
     has_cosine_head = True
     """CLIP's text encoder gives this backbone a cosine head (`forward_head`),
-    which is what CMKD's cross-modal terms are computed against."""
+    which is what CMKD's `reg_loss` is computed against."""
 
     def __init__(self, prompts, model_name):
         super(ClipBackbone, self).__init__()
@@ -106,9 +106,10 @@ class ImagenetBackbone(nn.Module):
     as a bare feature extractor.
 
     There is no text encoder here, so unlike `ClipBackbone` this has NO cosine
-    head -- `has_cosine_head` is what `TransferNet` reads to decide whether the
-    CMKD loss can run at all. Its target-side supervision comes entirely from
-    thresholded pseudo-labels applied by the training loop.
+    head -- `has_cosine_head` is what `TransferNet` reads to decide whether
+    CMKD's `reg_loss` can be computed at all. The rest of CMKD still runs,
+    against a reference the training loop passes in (the LoRA branch's
+    teacher), and a thresholded cross-teaching loss is applied on top.
 
     Unlike `ClipBackbone` this does not pin itself to CUDA; the caller's
     `.to(device)` places it.

@@ -1,3 +1,4 @@
+import pytest
 
 import torch
 
@@ -131,16 +132,17 @@ def test_self_reference_actually_changes_the_loss_once_lamb_is_nonzero():
             assert abs((got_self - got_live) - (self_ref[i] - live[i])) < 1e-9, i
 
 
-def test_the_warmup_step_skips_the_target_forward(imagenet_weights):
-    """Under the ImageNet source in warmup, both target-side losses are zero,
-    so nothing backward() traverses reaches the target forward's graph and its
-    saved tensors are never freed -- a whole backbone pass staying resident on
-    top of branch_lora's peak, which is what put a T4 over its 14.5 GiB. The
-    caller says so with need_target_logits=False; the pass must then not run."""
+def test_the_target_forward_is_skipped_when_nothing_would_backprop(imagenet_weights):
+    """Under the ImageNet source with branch_lora off there is no reference for
+    CMKD and no cross-teaching, so every target-side loss is zero, nothing
+    backward() traverses reaches the target forward's graph, and its saved
+    tensors are never freed -- a whole backbone pass staying resident on top of
+    branch_lora's peak, which is what put a T4 over its 14.5 GiB. The caller
+    says so with need_target_logits=False; the pass must then not run."""
     from cmct.branch_mlp import TransferNet
 
     model = TransferNet(None, model_name="resnet50", source="imagenet", num_classes=5,
-                        label_smoothing=0.1, max_iter=100)
+                        label_smoothing=0.1, lambdas=LAMBDAS, lamb_gamma=1.0, max_iter=100)
     model.base_network.train()
     model.classifier_layer.train()
     src, tgt = torch.randn(4, 3, 64, 64), torch.randn(4, 3, 64, 64)
@@ -151,3 +153,67 @@ def test_the_warmup_step_skips_the_target_forward(imagenet_weights):
     assert target_logits is None
     assert transfer_loss.item() == 0.0
     clf_loss.backward()  # the source pass is still the trainable one
+
+
+LAMBDAS = {"task": 0.25, "source_ce": 0.0, "target_gini": 0.0}
+"""What the ImageNet config carries: reg_loss's two weights must be zero there."""
+
+
+def test_cmkd_without_cosine_logits_equals_the_full_loss_at_zero_reg_lambdas():
+    """The ImageNet source has no cosine head, so CMKD runs with
+    target_logit_clip/source_logit_clip as None and reg_loss dropped. That arm
+    must differ from the full one in NOTHING but reg_loss -- an implementation
+    that fell back to the (missing) cosine branch for the self-reference, or
+    quietly rescaled coe/mix, would diverge here. Run past step 0 so lamb is
+    nonzero and task_loss/distill_loss actually contribute."""
+    fx = load_fixture("cmkd_loss.json")
+    zero_reg = {"task": fx["lambdas"]["task"], "source_ce": 0.0, "target_gini": 0.0}
+    full = CMKD(lambdas=zero_reg, lamb_gamma=fx["lamb_gamma"], max_iter=fx["max_iter"])
+    bare = CMKD(lambdas=zero_reg, lamb_gamma=fx["lamb_gamma"], max_iter=fx["max_iter"])
+    target_logit = torch.tensor(fx["target_logit"])
+    self_ref = torch.tensor(fx["self_ref_logit_clip"])
+    for i in range(fx["sequence_steps"]):
+        expected = full(target_logit, torch.tensor(fx["target_logit_clip"]),
+                        torch.tensor(fx["source_logit_clip"]), torch.tensor(fx["source_label"]),
+                        self_ref_logit_clip=self_ref).item()
+        got = bare(target_logit, None, None, None, self_ref_logit_clip=self_ref).item()
+        assert abs(got - expected) < 1e-6, (i, got, expected)
+    assert expected != 0.0, "fixture never leaves lamb == 0 -- recapture it"
+
+
+def test_cmkd_without_cosine_logits_requires_a_self_reference():
+    fx = load_fixture("cmkd_loss.json")
+    loss_fn = _cmkd_from_fixture(fx)
+    with pytest.raises(ValueError, match="self_ref_logit_clip"):
+        loss_fn(torch.tensor(fx["target_logit"]), None, None, None)
+
+
+def test_the_imagenet_transfer_loss_trains_the_branch_from_the_lora_reference(imagenet_weights):
+    """The wiring the unit tests above cannot see: TransferNet must feed its
+    OWN target logits and the caller's reference into CMKD and hand back a
+    loss that backward() actually reaches the backbone through. A transfer_loss
+    left disconnected from the graph, or built from the reference instead of
+    the branch's own prediction, would leave base_network's gradients at None
+    here while every other test still passed.
+
+    Two calls because CMKD's lamb is 0 at step 0 -- task_loss and distill_loss,
+    the only two terms left once reg_loss is dropped, vanish there.
+    """
+    from cmct.branch_mlp import TransferNet
+
+    model = TransferNet(None, model_name="resnet50", source="imagenet", num_classes=5,
+                        label_smoothing=0.1, lambdas=LAMBDAS, lamb_gamma=1.0, max_iter=100)
+    model.base_network.train()
+    model.classifier_layer.train()
+    src, tgt = torch.randn(4, 3, 64, 64), torch.randn(4, 3, 64, 64)
+    label = torch.randint(0, 5, (4,))
+    self_ref = torch.randn(4, 5)
+
+    model(src, tgt, label, self_ref_logit_clip=self_ref)
+    _, transfer_loss, _ = model(src, tgt, label, self_ref_logit_clip=self_ref)
+
+    assert transfer_loss.item() != 0.0
+    transfer_loss.backward()
+    last_conv = model.base_network.net.layer4[-1].conv3.weight
+    assert last_conv.grad is not None and last_conv.grad.abs().sum().item() > 0
+    assert self_ref.grad is None

@@ -111,10 +111,10 @@ class MlpBackboneConfig:
     and what CMKD needs -- it is CLIP's text encoder that gives the branch a
     cosine head) or "imagenet" (torchvision supervised weights).
 
-    "imagenet" changes what this branch IS. With no cosine head there is no
-    CMKD: the branch trains on source CE plus thresholded pseudo-labels from
-    its own EMA teacher and from the LoRA branch's teacher, making it a
-    symmetric peer of branch_lora rather than a cross-modal self-trainer. The
+    "imagenet" changes where CMKD's cross-modal reference comes from. With no
+    cosine head of its own, the branch takes the LoRA branch's teacher as that
+    reference and drops reg_loss, keeping CMKD's task and distill terms; a
+    thresholded cross-teaching loss is added after warmup as under "clip". The
     BN note above is also inverted -- `fix_bn` is not applied, so the ResNet's
     BatchNorm adapts to the target domain."""
 
@@ -189,8 +189,9 @@ class BranchMlpConfig:
     ema: TeacherEmaConfig
     lambdas: Lambdas | None = None
     lamb_gamma: float | None = None
-    """CMKD's only two settings. Required under `backbone.source: clip`,
-    rejected under "imagenet", where CMKD does not run at all."""
+    """CMKD's only two settings, required under either `backbone.source`.
+    Under "imagenet" the `source_ce`/`target_gini` lambdas must be 0.0: they
+    weight reg_loss, which needs a cosine head that source has not got."""
     pixel_mean: list[float] | None = None
     pixel_std: list[float] | None = None
     """Normalization for THIS branch's data loaders, overriding `data.pixel_mean`
@@ -308,28 +309,32 @@ def _validate(cfg: Config) -> None:
             f"under branch_mlp.backbone.source: {mlp_source}, got "
             f"{cfg.branch_mlp.backbone.name!r}"
         )
-    # CMKD runs only on a cosine head, which only the CLIP source has. Rather
-    # than let its settings sit in a config that ignores them, name them.
-    cmkd_set = cfg.branch_mlp.lambdas is not None or cfg.branch_mlp.lamb_gamma is not None
-    if mlp_source == "clip":
-        if cfg.branch_mlp.lambdas is None or cfg.branch_mlp.lamb_gamma is None:
-            raise ValueError(
-                "branch_mlp.lambdas and branch_mlp.lamb_gamma are both required under "
-                "branch_mlp.backbone.source: clip -- they are CMKD's settings"
-            )
-    else:
-        if cmkd_set:
-            raise ValueError(
-                "branch_mlp.lambdas/lamb_gamma have no effect under "
-                "branch_mlp.backbone.source: imagenet -- that backbone has no cosine "
-                "head, so CMKD does not run at all -- remove them"
-            )
+    # CMKD runs under both sources, so its settings are always required.
+    if cfg.branch_mlp.lambdas is None or cfg.branch_mlp.lamb_gamma is None:
+        raise ValueError(
+            "branch_mlp.lambdas and branch_mlp.lamb_gamma are both required -- "
+            "they are CMKD's settings, and CMKD runs under either "
+            "branch_mlp.backbone.source"
+        )
+    if mlp_source != "clip":
+        # reg_loss's two terms read cosine logits, which this backbone cannot
+        # produce, so CMKD drops the whole term. A nonzero weight on either
+        # would be silently ignored.
+        for field in ("source_ce", "target_gini"):
+            if getattr(cfg.branch_mlp.lambdas, field) != 0.0:
+                raise ValueError(
+                    f"branch_mlp.lambdas.{field} must be 0.0 under "
+                    "branch_mlp.backbone.source: imagenet -- it weights a "
+                    "reg_loss term that reads cosine logits, and that backbone "
+                    "has no cosine head"
+                )
         if cfg.branch_mlp.self_from_teacher:
             raise ValueError(
                 "branch_mlp.self_from_teacher has no effect under "
-                "branch_mlp.backbone.source: imagenet -- it selects CMKD's "
-                "self-reference, and that branch's self term is a thresholded "
-                "pseudo-label loss instead -- set it to false"
+                "branch_mlp.backbone.source: imagenet -- it selects between "
+                "this branch's own live cosine head and its EMA teacher's, and "
+                "that backbone has neither: CMKD's reference there is always "
+                "the LoRA branch's teacher -- set it to false"
             )
     if (cfg.branch_mlp.pixel_mean is None) != (cfg.branch_mlp.pixel_std is None):
         raise ValueError(

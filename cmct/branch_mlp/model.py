@@ -2,14 +2,15 @@
 `branch_mlp`'s model -- named for its head, since the loss it trains against
 is meant to be swappable; see `docs/design.md`.
 
-Two backbone sources, and the source decides the loss:
-  * "clip" -- `ClipBackbone`, which carries a cosine head, so the CMKD loss
-    runs and supplies the branch's own target-side signal.
-  * "imagenet" -- `ImagenetBackbone`, which has no text encoder and therefore
-    no cosine head. CMKD cannot run at all there (its three cross-modal terms
-    all read cosine logits), so this returns a zero transfer loss and the
-    training loop supplies every target-side signal as thresholded
-    pseudo-labels instead.
+CMKD runs under both backbone sources; what the source decides is where its
+cross-modal reference comes from and how much of the loss survives:
+  * "clip" -- `ClipBackbone` carries a cosine head, so the full CMKD loss runs
+    (task + distill + reg) against the branch's own CLIP predictions.
+  * "imagenet" -- `ImagenetBackbone` has no text encoder and so no cosine head.
+    The reference is the LoRA branch's teacher instead, passed in by the
+    caller, and `reg_loss` is dropped -- its two terms both read cosine logits
+    this backbone cannot produce. What is left is task + distill. The caller
+    adds a thresholded cross-teaching loss on top after warmup.
 
 See NOTICE for this module's license terms.
 """
@@ -40,7 +41,7 @@ def fix_bn(m):
 
 class TransferNet(nn.Module):
     def __init__(self, prompts, *, model_name, source="clip", num_classes,
-                 label_smoothing, lambdas=None, lamb_gamma=None, max_iter):
+                 label_smoothing, lambdas, lamb_gamma, max_iter):
         super(TransferNet, self).__init__()
         # define the network
         # get the feature extractor and the pretrained head
@@ -60,10 +61,7 @@ class TransferNet(nn.Module):
         self.classifier_layer.apply(weights_init_classifier)
 
         # define the loss functions
-        self.cmkd = (
-            CMKD(lambdas=lambdas, lamb_gamma=lamb_gamma, max_iter=max_iter)
-            if self.base_network.has_cosine_head else None
-        )
+        self.cmkd = CMKD(lambdas=lambdas, lamb_gamma=lamb_gamma, max_iter=max_iter)
         self.clf_loss = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
     def forward(self, source, target_img, source_label, *,
@@ -71,21 +69,20 @@ class TransferNet(nn.Module):
                 need_target_logits=True):
         # need_target_logits is read ONLY on the no-cosine-head path, and it is
         # about memory, not about compute. There, the target forward exists
-        # solely to feed the caller's pseudo-label losses; during that branch's
-        # warmup those are both zero, so nothing backward() traverses reaches
-        # this graph and its saved tensors are never freed -- a whole backbone
-        # pass stays resident for the rest of the macro-step, on top of
-        # branch_lora's own peak. Returning None instead is what keeps the
-        # warmup step's footprint honest.
+        # solely to feed losses the CALLER applies (cross-teaching) plus CMKD
+        # here; when branch_lora is off there is no reference for either, both
+        # are zero, and nothing backward() traverses reaches this graph -- a
+        # whole backbone pass would stay resident for the rest of the
+        # macro-step. Returning None instead is what keeps that step's
+        # footprint honest.
         #
-        # The CMKD path ignores it: there `target_logits` feeds the loss
-        # computed right here, so it is never optional.
-        if self.cmkd is None:
-            # No cosine head: source CE is the only loss computable here. Every
-            # target-side signal (self and cross pseudo-labels) is applied by
-            # the caller, so `target_img` is unused -- the single target pass
-            # below is the classifier's own prediction, on the strong view when
-            # there is one.
+        # The CLIP path ignores it: there `target_logits` feeds a loss computed
+        # right here unconditionally, so it is never optional.
+        if not self.base_network.has_cosine_head:
+            # No cosine head, so no source/target cosine logits and no
+            # reg_loss. CMKD still runs, against the reference the caller
+            # supplies (the LoRA branch's teacher); without one there is no
+            # target-side signal this branch can compute at all.
             #
             # fix_bn is deliberately NOT applied: it exists to hold a
             # CLIP-pretrained backbone's statistics still, and freezing an
@@ -96,9 +93,16 @@ class TransferNet(nn.Module):
             zero = torch.zeros((), device=source_logits.device)
             if not need_target_logits:
                 return clf_loss, zero, None
+            # `target_img` is the weak view the reference was computed on;
+            # `own_pred_target_img` the harder one the classifier predicts from
+            # when data.strong_aug is set. Only one forward either way.
             own_img = target_img if own_pred_target_img is None else own_pred_target_img
             target_logits = self.classifier_layer(self.base_network.forward_features(own_img))
-            return clf_loss, zero, target_logits
+            if self_ref_logit_clip is None:
+                return clf_loss, zero, target_logits
+            transfer_loss = self.cmkd(target_logits, None, None, None,
+                                      self_ref_logit_clip=self_ref_logit_clip)
+            return clf_loss, transfer_loss, target_logits
 
         self.base_network.apply(fix_bn)
         source = self.base_network.forward_features(source)
